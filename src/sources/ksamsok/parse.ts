@@ -28,13 +28,20 @@ export function extractXmlError(body: string): string {
 	return decodeXmlEntities(text).slice(0, 300) || "okänt fel";
 }
 
+/** Ogiltiga kodpunkter (för stora, surrogater) blir ersättningstecken i stället för RangeError. */
+function safeCodePoint(cp: number): string {
+	if (!Number.isInteger(cp) || cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return "\uFFFD";
+	return String.fromCodePoint(cp);
+}
+
 function decodeXmlEntities(s: string): string {
 	return s
 		.replace(/&lt;/g, "<")
 		.replace(/&gt;/g, ">")
 		.replace(/&quot;/g, '"')
 		.replace(/&apos;/g, "'")
-		.replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+		.replace(/&#(\d{1,10});/g, (_, d) => safeCodePoint(Number(d)))
+		.replace(/&#x([0-9a-fA-F]{1,6});/g, (_, h) => safeCodePoint(Number.parseInt(h, 16)))
 		.replace(/&amp;/g, "&");
 }
 

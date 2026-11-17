@@ -3,15 +3,14 @@ import { z } from "zod";
 import { SOURCE_NAMES, ToolInputError, UpstreamError } from "../errors";
 import { type Geometry, simplifyToLimit, swerefToWgs, wgsToSweref, countPositions } from "../geo/geometry";
 import { type ParsedId, parseId } from "../ids";
-import type { LamningPost, RecordFetchResult } from "../sources/types";
+import type { LamningPost, RecordFetchResult, Version } from "../sources/types";
 import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, fmtCoord, list, ok, runTool } from "./common";
+import { type DokumentPost, dokumentPost, formatDokumentRad, toDokumentPost } from "./dokument";
 
 export const MAX_GEOMETRY_POSITIONS = 500;
 
 const INKLUDERA = ["geometri", "referenser", "dokument", "historik", "relaterat"] as const;
 const SENARE: Record<string, string> = {
-	dokument: "Dokument (inventeringsböcker, bilder, händelseloggar) finns inte än – kommer i etapp 2.",
-	historik: "Versionshistorik finns inte än – kommer senare.",
 	relaterat: "Relaterat material (foton, arkivhandlingar, föremål) finns inte än – kommer senare.",
 };
 
@@ -78,6 +77,25 @@ const lamningSchema = z.object({
 			uppgiftslamnare: z.array(z.string()),
 		})
 		.optional(),
+	dokument: z.array(dokumentPost).optional(),
+	historik: z
+		.array(
+			z.object({
+				version_id: z.number().nullable(),
+				publicerad: z.string().nullable(),
+				registrerare: z.string().nullable(),
+				aktivitet: z
+					.object({
+						typ: z.string().nullable(),
+						nummer: z.string().nullable(),
+						atgardstyp: z.string().nullable(),
+						beskrivning: z.string().nullable(),
+						registrerad: z.string().nullable(),
+					})
+					.nullable(),
+			}),
+		)
+		.optional(),
 });
 
 export const lamningOutput = z.object({
@@ -97,7 +115,7 @@ export function registerLamning(server: McpServer, deps: ToolDeps): void {
 				"Hela posten för 1–10 lämningar ur Kulturmiljöregistret: identiteter, typ, antikvarisk bedömning med motivering, beskrivning, " +
 				"tradition, terräng, orientering, egenskaper, ingående lämningar, statusar, indelning, mittpunkt och lägesosäkerhet. " +
 				"Tar lämningsnummer, RAÄ-nummer (äldre litteratur), UUID eller K-samsök-URI. Hämtas från Fornsök-appen, med K-samsök som reserv. " +
-				"`inkludera` lägger till geometri och referenser.",
+				"`inkludera` lägger till geometri, referenser, dokument (med dokument_ref till hamta_dokument) och versionshistorik.",
 			inputSchema: lamningInput,
 			outputSchema: lamningOutput,
 			annotations: { ...READ_ONLY, title: "Hämta lämning" },
@@ -109,7 +127,7 @@ export function registerLamning(server: McpServer, deps: ToolDeps): void {
 export async function hamtaLamningar(args: LamningArgs, deps: ToolDeps) {
 	const inkludera = new Set(args.inkludera ?? []);
 	const anmarkningar: string[] = [];
-	for (const key of ["dokument", "historik", "relaterat"]) if (inkludera.has(key as (typeof INKLUDERA)[number])) anmarkningar.push(SENARE[key]);
+	for (const key of ["relaterat"]) if (inkludera.has(key as (typeof INKLUDERA)[number])) anmarkningar.push(SENARE[key]);
 
 	const ej_hittade: Array<{ id: string; orsak: string }> = [];
 	const parsed: ParsedId[] = [];
@@ -140,18 +158,37 @@ export async function hamtaLamningar(args: LamningArgs, deps: ToolDeps) {
 				});
 		}
 	}
-	const seen = new Set<string>();
-	const unique = wanted.filter((w) => (seen.has(w.uuid) ? false : (seen.add(w.uuid), true)));
+	const firstIdFor = new Map<string, string>();
+	const unique: Array<{ id: string; uuid: string }> = [];
+	for (const w of wanted) {
+		const first = firstIdFor.get(w.uuid);
+		if (first === undefined) {
+			firstIdFor.set(w.uuid, w.id);
+			unique.push(w);
+		} else {
+			anmarkningar.push(`"${w.id}" och "${first}" avser samma lämning; den visas en gång.`);
+		}
+	}
 
-	const results = await Promise.all(unique.map((w) => fetchWithFallback(w.uuid, deps)));
+	const results = await Promise.all(
+		unique.map(async (w) => {
+			const r = await fetchWithFallback(w.uuid, deps);
+			const extra = r.result ? await fetchExtras(w.uuid, inkludera, deps) : null;
+			return { r, extra };
+		}),
+	);
 	const lamningar: LamningPost[] = [];
-	results.forEach((r, i) => {
+	results.forEach(({ r, extra }, i) => {
 		if (r.notes.length) anmarkningar.push(...r.notes);
 		if (!r.result) {
 			ej_hittade.push({ id: unique[i].id, orsak: r.error ?? "Lämningen hittades inte." });
 			return;
 		}
-		lamningar.push(withIncludes(r.result, inkludera));
+		const post = withIncludes(r.result, inkludera);
+		if (extra?.dokument) post.dokument = extra.dokument;
+		if (extra?.historik) post.historik = extra.historik;
+		for (const n of extra?.notes ?? []) anmarkningar.push(`${post.lamningsnummer ?? post.uuid}: ${n}`);
+		lamningar.push(post);
 	});
 
 	if (lamningar.length === 0 && ej_hittade.length > 0 && parsed.length === 0) {
@@ -186,10 +223,55 @@ async function fetchWithFallback(
 			}
 			errors.push(`${name}: hittades inte`);
 		} catch (err) {
-			errors.push(err instanceof UpstreamError ? `${SOURCE_NAMES[err.source]}: ${err.message}` : `${name}: ${String(err)}`);
+			if (err instanceof UpstreamError) errors.push(`${SOURCE_NAMES[err.source]}: ${err.message}`);
+			else {
+				// Detaljen (t.ex. en adress som stoppats av listan över tillåtna anrop) loggas, men visas inte.
+				console.error(`lamning: oväntat fel från ${name}:`, err);
+				errors.push(`${name}: internt fel`);
+			}
 		}
 	}
 	return { result: null, notes, error: `Lämningen ${uuid} kunde inte hämtas (${errors.join("; ")}).` };
+}
+
+/**
+ * Dokument och historik från Fornsök-appen. Om appen inte svarar levereras
+ * posten ändå och delen rapporteras som ej hämtad (SPEC 8).
+ */
+async function fetchExtras(
+	uuid: string,
+	inkludera: Set<string>,
+	deps: ToolDeps,
+): Promise<{ dokument?: DokumentPost[]; historik?: Version[]; notes: string[] }> {
+	const notes: string[] = [];
+	const out: { dokument?: DokumentPost[]; historik?: Version[]; notes: string[] } = { notes };
+	const why = (err: unknown) => (err instanceof UpstreamError ? err.message : "oväntat fel");
+	await Promise.all([
+		inkludera.has("dokument")
+			? deps.documents
+					.listDokument(uuid)
+					.then((l) => {
+						out.dokument = l.dokument.map((d) => toDokumentPost(uuid, d));
+					})
+					.catch((err) => {
+						if (!(err instanceof UpstreamError)) console.error("dokument:", err);
+						notes.push(`dokument kunde inte hämtas (${why(err)}).`);
+					})
+			: null,
+		inkludera.has("historik")
+			? deps.history
+					.getVersioner(uuid)
+					.then((v) => {
+						if (v) out.historik = v;
+						else notes.push("versionshistorik saknas i Fornsök-appen.");
+					})
+					.catch((err) => {
+						if (!(err instanceof UpstreamError)) console.error("historik:", err);
+						notes.push(`historik kunde inte hämtas (${why(err)}).`);
+					})
+			: null,
+	]);
+	return out;
 }
 
 function withIncludes(r: RecordFetchResult, inkludera: Set<string>): LamningPost {
@@ -260,6 +342,27 @@ export function formatPost(l: LamningPost): string {
 				: "Geometri: saknas.",
 		);
 	}
+	if (l.dokument) {
+		if (l.dokument.length === 0) lines.push("Dokument: inga registrerade.");
+		else {
+			lines.push(`Dokument (${l.dokument.length}; hämta med hamta_dokument):`);
+			for (const d of l.dokument) lines.push(formatDokumentRad(d));
+		}
+	}
+	if (l.historik) {
+		lines.push(`Versionshistorik (${l.historik.length === 1 ? "1 publicerad version" : `${l.historik.length} publicerade versioner, nyast först`}):`);
+		for (const v of l.historik) lines.push(formatVersion(v));
+	}
 	lines.push(`Källa: ${l.kalla}; hämtad från ${l.hamtad_fran}.`);
 	return lines.join("\n");
+}
+
+function formatVersion(v: Version): string {
+	const a = v.aktivitet;
+	const akt = a
+		? [a.typ, a.nummer, a.atgardstyp ? `(${a.atgardstyp})` : null, a.beskrivning && a.beskrivning !== a.atgardstyp ? `– ${a.beskrivning}` : null]
+				.filter(Boolean)
+				.join(" ")
+		: "aktivitet okänd";
+	return `- ${v.publicerad ? v.publicerad.slice(0, 10) : "okänt datum"}: ${v.registrerare ?? "okänd registrerare"}; ${akt}${a?.registrerad ? `, registrerad ${a.registrerad.slice(0, 10)}` : ""}`;
 }

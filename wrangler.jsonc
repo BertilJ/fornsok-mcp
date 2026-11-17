@@ -1,13 +1,16 @@
 /**
- * Wrangler-konfiguration för Fornsök MCP.
+ * Wrangler-konfiguration för Fornsök MCP – för LOKAL utveckling (`npm run dev`).
  * https://developers.cloudflare.com/workers/wrangler/configuration/
  *
- * Etapp 1 körs bara lokalt (`npm run dev`). workers.dev och förhandsadresser
- * är avstängda redan nu (SPEC 9.3); egen domän och Access läggs till i etapp 1b.
- * Bindningar för D1, Vectorize, KV m.m. läggs till i senare etapper.
+ * Förvaret är publikt: inga konto-id, resurs-id:n, domäner, Access-uppgifter
+ * eller e-postadresser här (SPEC 13). Driftsättning görs med en ospårad
+ * `wrangler.local.jsonc` (mall: wrangler.local.example.jsonc):
+ *   npx wrangler deploy -c wrangler.local.jsonc
  *
- * Förvaret är publikt: inga konto-id, resurs-id:n, domäner eller e-postadresser
- * här (SPEC 13). Driftsättarens egna värden hålls i en ospårad lokal fil.
+ * Utan ACCESS_TEAM_DOMAIN/ACCESS_AUD svarar Workern 401 på allt. Lokalt sätts
+ * ACCESS_DEV_BYPASS="true" i `.dev.vars` (ospårad) för att slippa JWT – det
+ * gäller bara anrop till localhost. Bindningarna CACHE, RATE_LIMITER, DB,
+ * VECTORIZE och AI är valfria för koden och saknas här.
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",

@@ -4,7 +4,7 @@
  * förslag; flertydig socken ger kandidater med län.
  */
 import { DOMAIN_CACHE_TTL_MS } from "../config";
-import { ToolInputError } from "../errors";
+import { ToolInputError, UpstreamError } from "../errors";
 import type { DomainSource, Domaner, Kommun, Socken } from "../sources/types";
 import { LAN, didYouMean, findLan, lanByKod, normalizeName, suggest, suggestLan } from "./names";
 
@@ -12,35 +12,85 @@ export interface ResolvedSocken {
 	namn: string;
 	/** Länsavgränsning när namnet finns i flera socknar i landet. */
 	lan?: string[];
+	/** Kommunavgränsning när namnet finns i flera socknar i samma län. */
+	kommun?: string[];
+	/** Upplysning till svaret, t.ex. när avgränsningen inte kan bli exakt. */
+	anmarkning?: string;
 	id: string;
+}
+
+/** Hur länge ett misslyckat hämtförsök gör att nya försök väntar (felcache). */
+export const DOMAIN_ERROR_TTL_MS = 15_000;
+/** Längsta väntan på en annan förfrågans pågående hämtning innan man hämtar själv. */
+export const DOMAIN_SHARED_WAIT_MS = 25_000;
+
+/** Är värdelistorna rimligt kompletta? Tomma eller trasiga listor cachas aldrig. */
+export function domanerProblem(d: Domaner | null | undefined): string | null {
+	if (!d || typeof d !== "object") return "saknas";
+	const tomma = (["lamningstyper", "kommuner", "socknar", "landskap"] as const).filter((k) => !Array.isArray(d[k]) || d[k].length === 0);
+	if (tomma.length) return `tomma listor: ${tomma.join(", ")}`;
+	if (d.lamningstyper.some((t) => !t.namn) || d.kommuner.some((k) => !k.namn || !k.kod)) return "poster utan namn eller kod";
+	return null;
 }
 
 export class DomainService {
 	private cache: { value: Domaner; at: number } | null = null;
 	private inflight: Promise<Domaner> | null = null;
+	private failure: { error: unknown; at: number } | null = null;
 
 	constructor(
 		private readonly source: DomainSource,
 		private readonly ttlMs = DOMAIN_CACHE_TTL_MS,
 		private readonly now: () => number = Date.now,
+		private readonly errorTtlMs = DOMAIN_ERROR_TTL_MS,
+		private readonly sharedWaitMs = DOMAIN_SHARED_WAIT_MS,
 	) {}
 
-	/** Hämta värdelistorna (en gång per isolat och TTL; samtidiga anrop delar på samma hämtning). */
+	private load(): Promise<Domaner> {
+		const p = this.source.loadDomaner().then((value) => {
+			const problem = domanerProblem(value);
+			if (problem) throw new UpstreamError("fornsokapp", `Fornsök-appens värdelistor var ofullständiga (${problem})`);
+			this.cache = { value, at: this.now() };
+			this.failure = null;
+			return value;
+		});
+		const guarded = p.catch((err: unknown) => {
+			this.failure = { error: err, at: this.now() };
+			throw err;
+		});
+		this.inflight = guarded;
+		void guarded
+			.catch(() => {})
+			.finally(() => {
+				if (this.inflight === guarded) this.inflight = null;
+			});
+		return guarded;
+	}
+
+	/**
+	 * Hämta värdelistorna: minnescache (TTL), annars källan (med KV framför).
+	 * Samtidiga anrop delar på en pågående hämtning, men den som väntar på en
+	 * hämtning som en annan förfrågan startat gör ett eget försök om den
+	 * misslyckas eller dröjer (en avbruten förfrågan ska inte ge sitt fel eller
+	 * sin hängning till andra). Ett misslyckande cachas kort.
+	 */
 	async get(): Promise<Domaner> {
-		if (this.cache && this.now() - this.cache.at < this.ttlMs) return this.cache.value;
-		if (!this.inflight) {
-			this.inflight = this.source
-				.loadDomaner()
-				.then((value) => {
-					this.cache = { value, at: this.now() };
-					return value;
-				})
-				.finally(() => {
-					this.inflight = null;
-				});
+		const t = this.now();
+		if (this.cache && t - this.cache.at < this.ttlMs) return this.cache.value;
+		if (this.failure && t - this.failure.at < this.errorTtlMs && t >= this.failure.at) {
+			if (this.cache) return this.cache.value;
+			throw this.failure.error;
 		}
 		try {
-			return await this.inflight;
+			if (this.inflight) {
+				try {
+					return await withTimeout(this.inflight, this.sharedWaitMs);
+				} catch {
+					// Den delade hämtningen misslyckades eller dröjde: försök själv en gång.
+					return await this.load();
+				}
+			}
+			return await this.load();
 		} catch (err) {
 			// Hellre gamla listor än inga.
 			if (this.cache) return this.cache.value;
@@ -58,6 +108,26 @@ export class DomainService {
 				`Okänd lämningstyp "${input}".${didYouMean(suggest(input, all))} Använd verktyget uppslag med lista "lamningstyper" för alla typer.`,
 			);
 		});
+	}
+
+	/** Kategorier (exakta namn) med närmaste förslag vid okänt namn. */
+	async resolveKategorier(names: readonly string[]): Promise<string[]> {
+		const d = await this.get();
+		const all = d.kategorier.length ? d.kategorier : [...new Set(d.lamningstyper.flatMap((t) => t.kategorier))];
+		return names.map((input) => {
+			const hit = all.find((n) => normalizeName(n) === normalizeName(input));
+			if (hit) return hit;
+			throw new ToolInputError(
+				`Okänd kategori "${input}".${didYouMean(suggest(input, all))} Använd verktyget uppslag med lista "kategorier" för alla kategorier.`,
+			);
+		});
+	}
+
+	/** Alla lämningstyper (även inaktiva, som finns kvar på äldre poster) i någon av kategorierna. */
+	async lamningstyperIKategorier(kategorier: readonly string[]): Promise<string[]> {
+		const d = await this.get();
+		const set = new Set(kategorier);
+		return d.lamningstyper.filter((t) => t.kategorier.some((k) => set.has(k))).map((t) => t.namn);
 	}
 
 	async resolveKommuner(names: readonly string[]): Promise<Kommun[]> {
@@ -131,6 +201,20 @@ export class DomainService {
 				throw new ToolInputError(`Okänd socken "${input}".${didYouMean(suggest(q, [...new Set(d.socknar.map((s) => s.namn))]))}`);
 			}
 			const nationallyUnique = candidates.length === 1;
+			if (nationallyUnique && qualifier) {
+				// En kvalificerare som motsäger en entydig socken ska inte tas tyst.
+				const s = candidates[0];
+				const qual = qualifier;
+				const lan = findLan(qual);
+				const kommun = d.kommuner.find((k) => normalizeName(k.namn) === normalizeName(qual).replace(/ kommun$/, ""));
+				const matches = (lan && this.lanForSocken(s).includes(lan.namn)) || (kommun && s.kommunkoder.includes(kommun.kod));
+				if (!matches) {
+					throw new ToolInputError(
+						`Socknen "${s.namn}" finns bara i ${this.describeSocken(s, d)}, inte i "${qual}". Ange socknen utan kvalificerare eller med rätt län/kommun.`,
+						{ kandidater: [this.describeSocken(s, d)] },
+					);
+				}
+			}
 			if (candidates.length > 1 && qualifier) {
 				const qual = qualifier;
 				const lan = findLan(qual);
@@ -162,9 +246,40 @@ export class DomainService {
 				);
 			}
 			const s = candidates[0];
-			return nationallyUnique ? { namn: s.namn, id: s.id } : { namn: s.namn, id: s.id, lan: this.lanForSocken(s) };
+			if (nationallyUnique) return { namn: s.namn, id: s.id };
+			const lan = this.lanForSocken(s);
+			const out: ResolvedSocken = { namn: s.namn, id: s.id, lan };
+			// Samma namn i samma län (t.ex. Mo, Råda, Torp i Västra Götaland): län räcker inte,
+			// K-samsök har inget socken-id – avgränsa även på socknens kommuner.
+			const sameLan = d.socknar.filter((x) => x !== s && normalizeName(x.namn) === q && this.lanForSocken(x).some((l) => lan.includes(l)));
+			if (sameLan.length) {
+				const kommunNamn = (koder: string[]) =>
+					[...new Set(koder.map((k) => d.kommuner.find((x) => x.kod === k)?.namn).filter((x): x is string => !!x))];
+				out.kommun = kommunNamn(s.kommunkoder);
+				const andras = new Set(sameLan.flatMap((x) => x.kommunkoder));
+				const delade = kommunNamn(s.kommunkoder.filter((k) => andras.has(k)));
+				if (out.kommun.length === 0) {
+					delete out.kommun;
+					out.anmarkning = `Det finns flera socknar som heter ${s.namn} i ${lan.join("/")}, och socknens kommun är okänd; träffarna kan omfatta alla.`;
+				} else if (delade.length) {
+					out.anmarkning = `Det finns flera socknar som heter ${s.namn} i ${lan.join("/")}; avgränsat till kommun ${out.kommun.join(", ")}, men ${delade.join(", ")} har också en annan socken ${s.namn}, så träffar där kan höra till den.`;
+				} else {
+					out.anmarkning = `Det finns flera socknar som heter ${s.namn} i ${lan.join("/")}; avgränsat till kommun ${out.kommun.join(", ")}.`;
+				}
+			}
+			return out;
 		});
 	}
 }
 
 export { LAN };
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => reject(new Error("timeout")), ms);
+	});
+	return Promise.race([p, timeout]).finally(() => {
+		if (timer !== undefined) clearTimeout(timer);
+	});
+}

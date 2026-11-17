@@ -37,9 +37,9 @@ describe("MCP-servern med inspelade svar", () => {
 		await client?.close();
 	});
 
-	it("listar fyra verktyg i fast ordning med scheman och annotationer", async () => {
+	it("listar sex verktyg i fast ordning med scheman och annotationer", async () => {
 		const { tools } = await client.listTools();
-		expect(tools.map((t) => t.name)).toEqual(["sok_lamningar", "lamningar_nara", "lamning", "uppslag"]);
+		expect(tools.map((t) => t.name)).toEqual(["sok_lamningar", "lamningar_nara", "lamning", "lamning_dokument", "hamta_dokument", "uppslag"]);
 		for (const t of tools) {
 			expect(t.description).toBeTruthy();
 			expect(t.outputSchema).toBeTruthy();
@@ -79,7 +79,7 @@ describe("MCP-servern med inspelade svar", () => {
 	});
 
 	it("sok_lamningar: parametrar som kräver indexet ger tydligt fel", async () => {
-		for (const args of [{ fraga: "offer", lage: "betydelse" }, { kategori: ["Gravar"] }, { fraga: "x", egenskap: [{ typ: "Material", varde: "Koppar" }] }]) {
+		for (const args of [{ fraga: "offer", lage: "betydelse" }, { fraga: "x", egenskap: [{ typ: "Material", varde: "Koppar" }] }]) {
 			const r = await client.callTool({ name: "sok_lamningar", arguments: args });
 			expect(r.isError).toBe(true);
 			expect((r.content as Array<{ text: string }>)[0].text).toMatch(/finns inte än/);
@@ -160,7 +160,13 @@ describe("MCP-servern med inspelade svar", () => {
 		const c = byNr["L1946:7415"];
 		expect(c.raa_nummer).toBe("Stugun 114:1");
 		expect(c.geometri.type).toBe("LineString");
-		expect(s.anmarkningar.join(" ")).toMatch(/Dokument .* finns inte än/);
+		// dokument: listan för var och en av de tre posterna, med dokument_ref.
+		expect(a.dokument.map((d: Structured) => d.grupp)).toEqual(["inventeringsbok", "inventeringsbok", "handelselogg"]);
+		expect(c.dokument[0]).toMatchObject({ grupp: "inventeringsbok", filnamn: "2566-0114-01-D.jpg", storlek_byte: 283399, visas_som_bild: true });
+		expect(c.dokument[0].dokument_ref).toMatch(/^dok1_/);
+		expect(c.dokument[1]).toMatchObject({ grupp: "handelselogg", filtyp: "pdf", visas_som_bild: false });
+		expect(b.dokument).toHaveLength(5);
+		expect(s.anmarkningar).toEqual([]);
 		// Ett nummeruppslag mot K-samsök för de två numren, tre poster från appen, inga JSON-LD-anrop.
 		expect(calls.filter((x) => x.url.pathname === "/ksamsok/api")).toHaveLength(1);
 		expect(calls.filter((x) => x.url.pathname.startsWith("/raa/lamning/"))).toHaveLength(0);

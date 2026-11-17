@@ -36,7 +36,7 @@ export interface ResolvedSearchFilter {
 	antikvarisk_bedomning?: Bedomning[];
 	kommun?: string[];
 	/** Socken med ev. länsavgränsning när namnet finns i flera län. */
-	socken?: Array<{ namn: string; lan?: string[] }>;
+	socken?: Array<{ namn: string; lan?: string[]; kommun?: string[] }>;
 	landskap?: string[];
 	lan?: string[];
 	/** Ruta i WGS 84: [minLon, minLat, maxLon, maxLat]. */
@@ -132,6 +132,10 @@ export interface LamningPost {
 	geometri?: Geometry | null;
 	geometri_forenklad?: boolean;
 	referenser?: Referenser;
+	/** Dokumentlista (bara när den efterfrågats). Formen ägs av verktygslagret. */
+	dokument?: DokumentPost[];
+	/** Versionshistorik, nyast först (bara när den efterfrågats). */
+	historik?: Version[];
 }
 
 export interface RecordFetchResult {
@@ -224,4 +228,93 @@ export interface Domaner {
 
 export interface DomainSource {
 	loadDomaner(): Promise<Domaner>;
+}
+
+// ---------------------------------------------------------------- dokument
+
+/** Dokumentgrupperna i Fornsök-appens `dokument`-svar. */
+export const DOKUMENT_GRUPPER = ["inventeringsbok", "handelselogg", "bild", "maritim_dokumentation"] as const;
+export type DokumentGrupp = (typeof DOKUMENT_GRUPPER)[number];
+
+export interface DokumentFil {
+	/** Appens fil-id (base64-sträng). Används bara inom servern, aldrig som indata. */
+	id: string;
+	namn: string;
+	/** Filtyp enligt appen, t.ex. "jpg", "pdf". */
+	typ: string | null;
+	storlek_byte: number | null;
+	skapad: string | null;
+}
+
+export interface Dokument {
+	grupp: DokumentGrupp;
+	titel: string | null;
+	/** `lamningsinformationstyp`, t.ex. "Inventeringsbok", "Händelselogg". */
+	typ: string | null;
+	skapad: string | null;
+	/** Publik dokumentsida på pub.raa.se, om appen anger en giltig. */
+	url: string | null;
+	fil: DokumentFil | null;
+}
+
+/** Ett dokument som det visas i verktygssvaren (lamning_dokument, lamning). */
+export interface DokumentPost {
+	/** Ogenomskinlig referens till hamta_dokument; null om filen inte kan hämtas. */
+	dokument_ref: string | null;
+	grupp: DokumentGrupp;
+	titel: string | null;
+	typ: string | null;
+	skapad: string | null;
+	filnamn: string | null;
+	filtyp: string | null;
+	storlek_byte: number | null;
+	/** JPEG/PNG upp till 2 MB: hamta_dokument returnerar bilden. */
+	visas_som_bild: boolean;
+	url: string | null;
+}
+
+export interface DokumentLista {
+	uuid: string;
+	lamningsnummer: string | null;
+	dokument: Dokument[];
+}
+
+export interface DokumentFilSvar {
+	status: number;
+	/** Medietyp utan parametrar, gemener (t.ex. "image/jpeg"). */
+	mimeType: string;
+	contentLength: number | null;
+	bytes: Uint8Array | null;
+	tooLarge: boolean;
+}
+
+export interface DocumentSource {
+	/** Dokumentlistan för en lämning. Tom lista om appen säger att inga dokument finns. */
+	listDokument(uuid: string): Promise<DokumentLista>;
+	/** Hämta en bildfil (bara JPEG/PNG tillåts av listan över anrop), högst `maxBytes`. */
+	hamtaBild(fil: DokumentFil, maxBytes: number): Promise<DokumentFilSvar>;
+	/** Direktadress till filen i appen (för länk), eller null om id/namn inte är giltiga. */
+	filUrl(fil: DokumentFil): string | null;
+}
+
+// ---------------------------------------------------------------- historik
+
+export interface Version {
+	version_id: number | null;
+	publicerad: string | null;
+	registrerare: string | null;
+	/** Aktiviteten bakom versionen: en åtgärd i registret eller ett arkeologiskt uppdrag. */
+	aktivitet: {
+		typ: "Åtgärd" | "Uppdrag" | string | null;
+		nummer: string | null;
+		/** Åtgärdstyp, t.ex. "Migrering från FMIS" (bara åtgärder). */
+		atgardstyp: string | null;
+		beskrivning: string | null;
+		registrerad: string | null;
+	} | null;
+}
+
+export interface HistorySource {
+	/** Versionshistoriken, nyast först. null om lämningen inte finns. */
+	getVersioner(uuid: string): Promise<Version[] | null>;
 }

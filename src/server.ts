@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { SERVER_NAME, SERVER_VERSION } from "./config";
 import { SERVER_INSTRUCTIONS } from "./instructions";
 import type { ToolDeps } from "./tools/common";
+import { registerHamtaDokument, registerLamningDokument } from "./tools/dokument";
 import { registerLamning } from "./tools/lamning";
 import { registerLamningarNara } from "./tools/lamningar_nara";
 import { registerSokLamningar } from "./tools/sok_lamningar";
@@ -20,6 +21,8 @@ export function createServer(deps: ToolDeps): McpServer {
 	registerSokLamningar(server, deps);
 	registerLamningarNara(server, deps);
 	registerLamning(server, deps);
+	registerLamningDokument(server, deps);
+	registerHamtaDokument(server, deps);
 	registerUppslag(server, deps);
 	return server;
 }

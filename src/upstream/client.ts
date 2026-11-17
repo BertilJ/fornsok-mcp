@@ -20,6 +20,17 @@ export interface UpstreamResponse {
 	url: string;
 }
 
+export interface UpstreamBinaryResponse {
+	status: number;
+	contentType: string;
+	/** `Content-Length` enligt svaret, om angiven. */
+	contentLength: number | null;
+	/** Innehållet, eller null om status ≥ 400 eller svaret var för stort. */
+	bytes: Uint8Array | null;
+	tooLarge: boolean;
+	url: string;
+}
+
 export interface UpstreamClientOptions {
 	fetch?: FetchLike;
 	timeoutMs?: number;
@@ -32,31 +43,80 @@ export interface UpstreamClientOptions {
 	userAgent?: string;
 }
 
-/** Enkel semafor: högst `max` samtidiga. */
+/** Väntan på en plats i semaforen tog för lång tid. */
+export class SemaphoreTimeoutError extends Error {
+	constructor() {
+		super("semaphore wait timeout");
+		this.name = "SemaphoreTimeoutError";
+	}
+}
+
+export interface SemaphoreOptions {
+	/** En plats som hållits längre än så räknas som övergiven och återtas. */
+	maxHoldMs?: number;
+	/** Längsta väntan på en plats. */
+	maxWaitMs?: number;
+	/** Hur ofta en väntande försöker igen. */
+	pollMs?: number;
+	now?: () => number;
+}
+
+/**
+ * Semafor: högst `max` samtidiga. Delas mellan förfrågningar i ett isolat,
+ * därför utan överlämning mellan anropare: i Workers kan en förfrågan avbrytas
+ * mitt i, och ett löfte som en annan förfrågan väntar på ska aldrig behöva
+ * lösas från den avbrutnas sammanhang. En väntande provar i stället själv
+ * igen med korta pauser (egna timers), och en plats som hållits orimligt länge
+ * (förfrågan avbröts innan `finally` hann köras) återtas.
+ */
 export class Semaphore {
-	private active = 0;
-	private readonly queue: Array<() => void> = [];
-	constructor(private readonly max: number) {}
+	private readonly leases = new Map<number, number>();
+	private nextId = 1;
+	private readonly maxHoldMs: number;
+	private readonly maxWaitMs: number;
+	private readonly pollMs: number;
+	private readonly now: () => number;
+
+	constructor(
+		private readonly max: number,
+		options: SemaphoreOptions = {},
+	) {
+		this.maxHoldMs = options.maxHoldMs ?? 60_000;
+		this.maxWaitMs = options.maxWaitMs ?? 30_000;
+		this.pollMs = options.pollMs ?? 10;
+		this.now = options.now ?? Date.now;
+	}
 
 	async run<T>(fn: () => Promise<T>): Promise<T> {
-		if (this.active >= this.max) {
-			// Platsen lämnas över direkt av den som släpper (active räknas inte ned),
-			// så att ingen ny anropare hinner emellan.
-			await new Promise<void>((resolve) => this.queue.push(resolve));
-		} else {
-			this.active++;
-		}
+		const id = await this.acquire();
 		try {
 			return await fn();
 		} finally {
-			const next = this.queue.shift();
-			if (next) next();
-			else this.active--;
+			this.leases.delete(id);
+		}
+	}
+
+	private tryAcquire(): number | null {
+		const t = this.now();
+		for (const [id, at] of this.leases) if (t - at > this.maxHoldMs || t < at) this.leases.delete(id);
+		if (this.leases.size >= this.max) return null;
+		const id = this.nextId++;
+		this.leases.set(id, t);
+		return id;
+	}
+
+	private async acquire(): Promise<number> {
+		const start = this.now();
+		for (;;) {
+			const id = this.tryAcquire();
+			if (id !== null) return id;
+			if (this.now() - start >= this.maxWaitMs) throw new SemaphoreTimeoutError();
+			await sleep(this.pollMs);
 		}
 	}
 
 	get inFlight(): number {
-		return this.active;
+		return this.leases.size;
 	}
 }
 
@@ -83,7 +143,8 @@ export class UpstreamClient {
 	private semaphore(source: SourceId): Semaphore {
 		let s = this.semaphores.get(source);
 		if (!s) {
-			s = new Semaphore(this.maxConcurrent);
+			// Ett anrop håller platsen högst två försök + paus; marginal för långsam läsning.
+			s = new Semaphore(this.maxConcurrent, { maxHoldMs: this.timeoutMs * 3 + 10_000, maxWaitMs: this.timeoutMs * 2 + 5_000 });
 			this.semaphores.set(source, s);
 		}
 		return s;
@@ -96,9 +157,56 @@ export class UpstreamClient {
 	 * om anropet inte är tillåtet.
 	 */
 	async get(url: string | URL, accept = "application/json"): Promise<UpstreamResponse> {
+		const source = checkAllowed("GET", url).source;
+		return this.request(url, accept, async (res) => ({
+			status: res.status,
+			contentType: res.headers.get("content-type") ?? "",
+			body: await this.readBody(res, source),
+			url: res.url || String(url),
+		}));
+	}
+
+	/**
+	 * GET av en binär fil med en hård storleksgräns. Läser aldrig mer än
+	 * `maxBytes`: anges en större `Content-Length`, eller blir strömmen längre,
+	 * avbryts läsningen och `tooLarge` sätts (utan innehåll). Svar med status
+	 * ≥ 400 läses inte.
+	 */
+	async getBytes(url: string | URL, accept: string, maxBytes: number): Promise<UpstreamBinaryResponse> {
+		return this.request(url, accept, async (res) => {
+			const base = {
+				status: res.status,
+				contentType: res.headers.get("content-type") ?? "",
+				contentLength: parseContentLength(res.headers.get("content-length")),
+				url: res.url || String(url),
+			};
+			if (res.status >= 400) {
+				await res.body?.cancel();
+				return { ...base, bytes: null, tooLarge: false };
+			}
+			if (base.contentLength !== null && base.contentLength > maxBytes) {
+				await res.body?.cancel();
+				return { ...base, bytes: null, tooLarge: true };
+			}
+			const bytes = await readLimited(res, maxBytes);
+			return bytes ? { ...base, bytes, tooLarge: false } : { ...base, bytes: null, tooLarge: true };
+		});
+	}
+
+	private async runLimited<T>(source: SourceId, fn: () => Promise<T>): Promise<T> {
+		try {
+			return await this.semaphore(source).run(fn);
+		} catch (err) {
+			if (err instanceof SemaphoreTimeoutError) throw new UpstreamError(source, `${SOURCE_NAMES[source]}: för många samtidiga anrop, försök igen`);
+			throw err;
+		}
+	}
+
+	/** Gemensam väg: lista, semafor, omdirigeringar, tidsgräns och ett omförsök. */
+	private async request<T>(url: string | URL, accept: string, read: (res: Response) => Promise<T>): Promise<T> {
 		const call = checkAllowed("GET", url);
 		const source = call.source;
-		return this.semaphore(source).run(async () => {
+		return this.runLimited(source, async () => {
 			let lastError: unknown;
 			for (let attempt = 0; attempt < 2; attempt++) {
 				if (attempt > 0) await sleep(this.retryDelayMs);
@@ -106,16 +214,11 @@ export class UpstreamClient {
 					const res = await this.fetchFollowingAllowedRedirects(String(url), accept);
 					if ((res.status >= 500 || res.status === 429) && attempt === 0) {
 						lastError = new UpstreamError(source, `${SOURCE_NAMES[source]} svarade ${res.status}`, res.status);
+						await res.body?.cancel();
 						if (res.status === 429) await sleep(retryAfterMs(res.headers.get("retry-after")));
 						continue;
 					}
-					const body = await this.readBody(res, source);
-					return {
-						status: res.status,
-						contentType: res.headers.get("content-type") ?? "",
-						body,
-						url: res.url || String(url),
-					};
+					return await read(res);
 				} catch (err) {
 					// Otillåtna anrop och för stora svar prövas inte igen.
 					if (err instanceof DisallowedCallError || err instanceof UpstreamError) throw err;
@@ -123,9 +226,10 @@ export class UpstreamClient {
 				}
 			}
 			if (lastError instanceof UpstreamError) throw lastError;
+			if (!isTimeout(lastError)) console.warn(`upstream: ${call.id} gick inte att nå:`, errorMessage(lastError));
 			const msg = isTimeout(lastError)
 				? `${SOURCE_NAMES[source]} svarade inte inom ${Math.round(this.timeoutMs / 1000)} s`
-				: `${SOURCE_NAMES[source]} gick inte att nå (${errorMessage(lastError)})`;
+				: `${SOURCE_NAMES[source]} gick inte att nå`;
 			throw new UpstreamError(source, msg);
 		});
 	}
@@ -162,18 +266,47 @@ export class UpstreamClient {
 		throw new DisallowedCallError(`För många omdirigeringar från ${url}`);
 	}
 
+	/** Läser texten strömmande och avbryter vid storleksgränsen (även utan Content-Length). */
 	private async readBody(res: Response, source: SourceId): Promise<string> {
-		const len = Number(res.headers.get("content-length") ?? "0");
-		if (len > this.maxBodyBytes) {
+		const len = parseContentLength(res.headers.get("content-length"));
+		if (len !== null && len > this.maxBodyBytes) {
 			await res.body?.cancel();
 			throw new UpstreamError(source, `${SOURCE_NAMES[source]}: svaret är för stort (${len} byte)`);
 		}
-		const text = await res.text();
-		if (text.length > this.maxBodyBytes) {
-			throw new UpstreamError(source, `${SOURCE_NAMES[source]}: svaret är för stort`);
-		}
-		return text;
+		const bytes = await readLimited(res, this.maxBodyBytes);
+		if (!bytes) throw new UpstreamError(source, `${SOURCE_NAMES[source]}: svaret är för stort`);
+		return new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(bytes);
 	}
+}
+
+function parseContentLength(h: string | null): number | null {
+	if (h === null || !/^\d{1,15}$/.test(h.trim())) return null;
+	return Number(h.trim());
+}
+
+/** Läs högst `max` byte; null om strömmen är längre. */
+async function readLimited(res: Response, max: number): Promise<Uint8Array | null> {
+	if (!res.body) return new Uint8Array(0);
+	const reader = res.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		total += value.byteLength;
+		if (total > max) {
+			await reader.cancel();
+			return null;
+		}
+		chunks.push(value);
+	}
+	const out = new Uint8Array(total);
+	let offset = 0;
+	for (const c of chunks) {
+		out.set(c, offset);
+		offset += c.byteLength;
+	}
+	return out;
 }
 
 function sleep(ms: number): Promise<void> {

@@ -27,11 +27,11 @@ interface TestKey {
 	jwk: JsonWebKey & { kid: string };
 }
 async function genKey(kid: string): Promise<TestKey> {
-	const pair = await crypto.subtle.generateKey(
+	const pair = (await crypto.subtle.generateKey(
 		{ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
 		true,
 		["sign", "verify"],
-	);
+	)) as CryptoKeyPair;
 	const jwk = (await crypto.subtle.exportKey("jwk", pair.publicKey)) as JsonWebKey;
 	return { kid, priv: pair.privateKey, jwk: { ...jwk, kid, alg: "RS256", use: "sig" } };
 }
@@ -321,11 +321,11 @@ describe("verifyAccessRequest", () => {
 	});
 
 	it("nyckel under 2048 bit ignoreras", async () => {
-		const small = await crypto.subtle.generateKey(
+		const small = (await crypto.subtle.generateKey(
 			{ name: "RSASSA-PKCS1-v1_5", modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
 			true,
 			["sign", "verify"],
-		);
+		)) as CryptoKeyPair;
 		const jwk = (await crypto.subtle.exportKey("jwk", small.publicKey)) as JsonWebKey;
 		const tk: TestKey = { kid: "small", priv: small.privateKey, jwk: { ...jwk, kid: "small", alg: "RS256", use: "sig" } };
 		const env = makeEnv([tk, K1]);

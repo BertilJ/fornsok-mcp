@@ -4,10 +4,14 @@ import { publicUrl } from "../config";
 import { ToolInputError } from "../errors";
 import { bboxAround } from "../geo/geometry";
 import { isInSweden, round, toPlanar } from "../geo/sweref";
-import { splitWords } from "../sources/ksamsok/query";
+import { normalizeName } from "../lookup/names";
+import { MAX_ORD, splitWords } from "../sources/ksamsok/query";
 import { BEDOMNINGAR, type ResolvedSearchFilter } from "../sources/types";
 import { READ_ONLY, type ToolDeps, fmtCoord, list, ok, runTool } from "./common";
 import { makeUtdrag } from "./utdrag";
+
+/** Högst så många lämningstyper i en K-samsök-fråga (adresslängd). Den största kategorin har 32. */
+const MAX_TYPER_I_FRAGA = 60;
 
 const namnLista = (beskrivning: string) => z.array(z.string().min(1).max(100)).min(1).max(20).optional().describe(beskrivning);
 
@@ -31,7 +35,9 @@ export const sokInput = z.object({
 		.optional()
 		.describe("Lämningsnummer (L2001:646) eller RAÄ-nummer (Bjursås 27:1)."),
 	lamningstyp: namnLista("Lämningstyper, t.ex. \"Hyttområde\". Se uppslag lista=lamningstyper."),
-	kategori: namnLista("Kategorier av lämningstyper. Kommer senare (kräver indexet)."),
+	kategori: namnLista(
+		"Kategorier av lämningstyper, t.ex. \"Gravar\" eller \"Metallframställning och bergsbruk\". Översätts till kategorins lämningstyper (se uppslag lista=kategorier). Tillsammans med lamningstyp gäller typer som finns i båda.",
+	),
 	antikvarisk_bedomning: z.array(z.enum(BEDOMNINGAR)).min(1).max(5).optional().describe("Antikvarisk bedömning."),
 	kommun: namnLista("Kommunnamn, t.ex. \"Falun\"."),
 	socken: namnLista("Socknar. Flertydiga namn anges med län, t.ex. \"Näs (Jämtland)\"."),
@@ -111,11 +117,6 @@ export async function sokLamningar(args: SokArgs, deps: ToolDeps) {
 			'Semantisk sökning (lage: "betydelse") finns inte än – den kommer när det egna indexet är byggt (Dalarnas län). Använd lage "ord" och pröva flera ordformer och synonymer.',
 		);
 	}
-	if (args.kategori?.length) {
-		throw new ToolInputError(
-			"Filter på kategori finns inte än – det kommer med det egna indexet. Ange i stället lämningstyper (se uppslag lista=lamningstyper, som visar varje typs kategori).",
-		);
-	}
 	if (args.egenskap?.length) {
 		throw new ToolInputError(
 			"Filter på egenskaper (typ/värde) finns inte än – det kräver det egna indexet och kommer senare. Sök i stället på egenskapsordet i fraga, t.ex. \"koppar\".",
@@ -124,15 +125,57 @@ export async function sokLamningar(args: SokArgs, deps: ToolDeps) {
 
 	const anmarkningar: string[] = [];
 
-	const ord = args.fraga ? splitWords(args.fraga) : [];
-	if (args.fraga && ord.length === 0) throw new ToolInputError("Frågan innehåller inga sökbara ord.");
+	// K-samsök söker inte lämnings- eller RAÄ-nummer i fritext (SPEC 3 #9): flytta dem till nummer.
+	// Ett RAÄ-nummer börjar med socknens (eller stadens) namn; kontrollera mot värdelistorna.
+	let sockenNamn: Set<string> | null = null;
+	if (args.fraga && RAA_NUMMER_RE.test(args.fraga.normalize("NFC").trim().replace(/\s+/g, " "))) {
+		const d = await deps.domains.get();
+		sockenNamn = new Set(d.socknar.map((s) => normalizeName(s.namn)));
+	}
+	const { ord: allaOrd, nummer: nummerIFraga } = args.fraga
+		? splitFraga(args.fraga, (prefix) => sockenNamn?.has(normalizeName(prefix)) ?? false)
+		: { ord: [], nummer: [] };
+	if (nummerIFraga.length) {
+		anmarkningar.push(
+			`${nummerIFraga.map((n) => `"${n}"`).join(", ")} i fraga ser ut som lämnings- eller RAÄ-nummer och söktes via nummer (K-samsök hittar inte nummer i fritext).`,
+		);
+	}
+	if (args.fraga && allaOrd.length === 0 && nummerIFraga.length === 0) throw new ToolInputError("Frågan innehåller inga sökbara ord.");
+	const ord = allaOrd.slice(0, MAX_ORD);
+	if (allaOrd.length > MAX_ORD) {
+		anmarkningar.push(`fraga hade ${allaOrd.length} ord; bara de ${MAX_ORD} första användes (${allaOrd.slice(MAX_ORD).join(", ")} ströks). Alla ord måste finnas i posten, så färre ord ger oftast fler träffar.`);
+	}
+	if (ord.some((w) => /^\d{1,5}:\d{1,4}$/.test(w))) {
+		anmarkningar.push("fraga innehåller något som liknar ett RAÄ-nummer; ange hela numret (t.ex. \"Bjursås 27:1\") i nummer – K-samsök söker inte nummer i fritext.");
+	}
 
 	const filter: ResolvedSearchFilter = {};
 	if (ord.length) filter.ord = ord;
-	if (args.nummer?.length) filter.nummer = args.nummer.map((n) => n.trim().replace(/\s+/g, " "));
+	const nummer = [...(args.nummer ?? []).map((n) => n.trim().replace(/\s+/g, " ")), ...nummerIFraga];
+	if (nummer.length) filter.nummer = [...new Set(nummer)];
 	if (args.antikvarisk_bedomning?.length) filter.antikvarisk_bedomning = [...new Set(args.antikvarisk_bedomning)];
 	if (args.lan?.length) filter.lan = [...new Set(deps.domains.resolveLan(args.lan))];
 	if (args.lamningstyp?.length) filter.lamningstyp = [...new Set(await deps.domains.resolveLamningstyper(args.lamningstyp))];
+	let kategorier: string[] = [];
+	if (args.kategori?.length) {
+		kategorier = [...new Set(await deps.domains.resolveKategorier(args.kategori))];
+		const typer = await deps.domains.lamningstyperIKategorier(kategorier);
+		const valda = filter.lamningstyp ? typer.filter((t) => filter.lamningstyp?.includes(t)) : typer;
+		if (valda.length === 0) {
+			throw new ToolInputError(
+				filter.lamningstyp
+					? `Ingen av lämningstyperna ${filter.lamningstyp.map((t) => `"${t}"`).join(", ")} hör till kategorin ${kategorier.map((k) => `"${k}"`).join(", ")}. Ta bort ett av filtren, eller se uppslag lista=lamningstyper för typernas kategorier.`
+					: `Kategorin ${kategorier.map((k) => `"${k}"`).join(", ")} har inga lämningstyper i värdelistorna.`,
+			);
+		}
+		if (valda.length > MAX_TYPER_I_FRAGA) {
+			throw new ToolInputError(
+				`Kategorierna motsvarar ${valda.length} lämningstyper, fler än ${MAX_TYPER_I_FRAGA} som går att skicka i en fråga till K-samsök. Välj färre kategorier.`,
+			);
+		}
+		filter.lamningstyp = valda;
+		anmarkningar.push(`kategori ${kategorier.join(", ")} har översatts till ${valda.length} lämningstyper (se filter.lamningstyp).`);
+	}
 	const kommuner = args.kommun?.length ? await deps.domains.resolveKommuner(args.kommun) : [];
 	if (kommuner.length) filter.kommun = [...new Set(kommuner.map((k) => k.namn))];
 	if (args.landskap?.length) filter.landskap = [...new Set(await deps.domains.resolveLandskap(args.landskap))];
@@ -141,7 +184,8 @@ export async function sokLamningar(args: SokArgs, deps: ToolDeps) {
 			kommunkoder: kommuner.map((k) => k.kod),
 			lan: filter.lan,
 		});
-		filter.socken = socknar.map((s) => ({ namn: s.namn, ...(s.lan ? { lan: s.lan } : {}) }));
+		filter.socken = socknar.map((s) => ({ namn: s.namn, ...(s.lan ? { lan: s.lan } : {}), ...(s.kommun ? { kommun: s.kommun } : {}) }));
+		for (const s of socknar) if (s.anmarkning) anmarkningar.push(s.anmarkning);
 	}
 	let center: { lat: number; lon: number } | null = null;
 	if (args.nara) {
@@ -185,14 +229,15 @@ export async function sokLamningar(args: SokArgs, deps: ToolDeps) {
 		if (ord.length > 1) forslag.push("Färre ord – alla ord måste finnas i posten.");
 		if (ord.length) forslag.push("Andra böjningsformer, synonymer eller äldre stavning (t.ex. hytta/hyttan, kolbotten/kolbottnar, hv/v).");
 		if (filter.socken || filter.kommun) forslag.push("Bredare område (län eller landskap i stället för socken/kommun).");
-		if (filter.lamningstyp) forslag.push("Utan lämningstyp, eller med närliggande typer (se uppslag).");
+		if (kategorier.length) forslag.push("Annan eller ingen kategori.");
+		else if (filter.lamningstyp) forslag.push("Utan lämningstyp, eller med närliggande typer (se uppslag).");
 		if (filter.antikvarisk_bedomning) forslag.push("Utan filter på antikvarisk bedömning.");
 		if (filter.bbox) forslag.push("Större radie, eller lamningar_nara som räknar avstånd till hela geometrin.");
 	}
 	const sidStart = (args.sida - 1) * args.antal + 1;
 	if (page.totalt > 0 && traffar.length === 0) anmarkningar.push(`Sidan ${args.sida} ligger efter sista träffen.`);
 
-	const appliedFilter: Record<string, unknown> = { ...filter };
+	const appliedFilter: Record<string, unknown> = { ...filter, ...(kategorier.length ? { kategori: kategorier } : {}) };
 	const structured = {
 		totalt: page.totalt,
 		sida: args.sida,
@@ -236,9 +281,33 @@ function describeFilter(f: ResolvedSearchFilter): string {
 	if (f.lamningstyp) parts.push(`typ: ${f.lamningstyp.join(", ")}`);
 	if (f.antikvarisk_bedomning) parts.push(`bedömning: ${f.antikvarisk_bedomning.join(", ")}`);
 	if (f.kommun) parts.push(`kommun: ${f.kommun.join(", ")}`);
-	if (f.socken) parts.push(`socken: ${f.socken.map((s) => (s.lan ? `${s.namn} (${s.lan.join("/")})` : s.namn)).join(", ")}`);
+	if (f.socken) {
+		const q = (s: NonNullable<ResolvedSearchFilter["socken"]>[number]) => [s.lan?.join("/"), s.kommun?.join("/")].filter(Boolean).join(", ");
+		parts.push(`socken: ${f.socken.map((s) => (q(s) ? `${s.namn} (${q(s)})` : s.namn)).join(", ")}`);
+	}
 	if (f.landskap) parts.push(`landskap: ${f.landskap.join(", ")}`);
 	if (f.lan) parts.push(`län: ${f.lan.join(", ")}`);
 	if (f.bbox) parts.push(`område: ${f.bbox.map((n) => n.toFixed(4)).join(", ")}`);
 	return parts.join("; ");
+}
+
+const LAMNINGSNUMMER_RE = /^L\d{4}:\d{1,6}$/i;
+/** RAÄ-nummer med kolon, t.ex. "Stugun 114:1", "Stora Kopparberg 172:1". Utan kolon är det för likt vanlig text. */
+const RAA_NUMMER_RE = /^[\p{L}][\p{L}\p{M} .'-]{0,60}? \d{1,5}:\d{1,4}$/u;
+
+/**
+ * Dela fritexten i ord och nummer. Är hela frågan ett lämnings- eller
+ * RAÄ-nummer blir den ett nummer; annars plockas ord som är lämningsnummer ut.
+ */
+export function splitFraga(fraga: string, isSocken: (prefix: string) => boolean = () => false): { ord: string[]; nummer: string[] } {
+	const whole = fraga.normalize("NFC").trim().replace(/\s+/g, " ");
+	if (LAMNINGSNUMMER_RE.test(whole)) return { ord: [], nummer: [`L${whole.slice(1)}`] };
+	if (RAA_NUMMER_RE.test(whole) && isSocken(whole.replace(/ \d{1,5}:\d{1,4}$/, ""))) return { ord: [], nummer: [whole] };
+	const ord: string[] = [];
+	const nummer: string[] = [];
+	for (const w of splitWords(fraga)) {
+		if (LAMNINGSNUMMER_RE.test(w)) nummer.push(`L${w.slice(1)}`);
+		else ord.push(w);
+	}
+	return { ord, nummer };
 }

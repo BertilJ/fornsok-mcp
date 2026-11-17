@@ -6,6 +6,10 @@ import type { FetchLike } from "../src/upstream/client";
 
 export const FIXTURES = join(__dirname, "fixtures");
 
+export function fixtureBytes(name: string): Uint8Array {
+	return new Uint8Array(readFileSync(join(FIXTURES, name)));
+}
+
 export function fixtureText(name: string): string {
 	return readFileSync(join(FIXTURES, name), "utf8");
 }
@@ -89,6 +93,48 @@ export function standardRoutes(): Route[] {
 				];
 			},
 		) as Route[]),
+		...(["L2001-646:adc490ba-871a-45bd-8e3d-0a27761b3b6c", "L2000-8802:6d1cf7b6-f5bd-4066-aba6-fb1ea3ce8c75", "L1946-7415:bfe10d94-5d11-4943-8085-4b1bfcaacf64"].flatMap(
+			(pair) => {
+				const [nr, uuid] = pair.split(":");
+				return [
+					{
+						match: (u: URL) => u.hostname === "app.raa.se" && u.pathname === "/open/fornsok/api/lamning/dokument" && u.searchParams.get("lamning_id") === uuid,
+						respond: () => fixtureResponse(`app-dokument-${nr}.json`),
+					},
+				];
+			},
+		) as Route[]),
+		{
+			// Okänd lämning eller lämning utan dokument: appen svarar 404 (inspelat).
+			match: (u) => u.hostname === "app.raa.se" && u.pathname === "/open/fornsok/api/lamning/dokument",
+			respond: () => fixtureResponse("app-dokument-404.json", 404),
+		},
+		{
+			match: (u) => u.hostname === "app.raa.se" && u.pathname === "/open/fornsok/api/lamning/lamning/bfe10d94-5d11-4943-8085-4b1bfcaacf64/version",
+			respond: () => fixtureResponse("app-version-L1946-7415.json"),
+		},
+		{
+			match: (u) => u.hostname === "app.raa.se" && u.pathname === "/open/fornsok/api/lamning/lamning/6d1cf7b6-f5bd-4066-aba6-fb1ea3ce8c75/version",
+			respond: () => fixtureResponse("app-version-L2000-8802.json"),
+		},
+		{
+			// Inventeringsboksuppslaget för L1946:7415. Riktiga svarshuvuden (inspelade), men en
+			// nedskalad JPEG i stället för originalets 283 kB.
+			match: (u) =>
+				u.hostname === "app.raa.se" &&
+				u.pathname === "/open/fornsok/api/lamning/dokument/fil/aWlwYXg6Ly9vYmplY3RiYXNlLmRvY3VtZW50L2RvY3BhcnRpdGlvbiMzMTA5ODk%3D/2566-0114-01-D.jpg",
+			respond: () => {
+				const body = fixtureBytes("app-dokument-fil-L1946-7415-nedskalad.jpg");
+				return new Response(body, {
+					status: 200,
+					headers: {
+						"content-type": "image/jpeg;charset=UTF-8",
+						"content-disposition": 'inline; filename="2566-0114-01-D.jpg"',
+						"content-length": String(body.byteLength),
+					},
+				});
+			},
+		},
 		{
 			match: (u) => u.hostname === "app.raa.se" && u.pathname === "/open/fornsok/api/lamning/domaner",
 			respond: () => fixtureResponse("app-lamning-domaner.json"),
@@ -124,4 +170,42 @@ function near(u: URL, lon: number, lat: number): boolean {
 export function fixtureDeps(routes: Route[] = standardRoutes()): { deps: ToolDeps; calls: Array<{ url: URL; headers: Headers }> } {
 	const { fetch, calls } = fakeFetch(routes);
 	return { deps: createLiveDeps({ fetch, retryDelayMs: 0 }), calls };
+}
+
+/** MCP-klient mot servern i processen (createMcpHandler), med inspelade svar. */
+export async function connectMcp(routes: Route[] = standardRoutes(), options: Parameters<typeof createLiveDeps>[0] = {}) {
+	const { Client, StreamableHTTPClientTransport } = await import("@modelcontextprotocol/client");
+	const { createMcpHandler } = await import("agents/mcp/server");
+	const { createServer } = await import("../src/server");
+	const { fetch, calls } = fakeFetch(routes);
+	const deps = createLiveDeps({ fetch, retryDelayMs: 0, ...options });
+	const handler = createMcpHandler(() => createServer(deps));
+	const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
+	const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+		const req = new Request(input, init);
+		req.headers.set("host", new URL(req.url).host);
+		return handler(req, {}, ctx);
+	};
+	const client = new Client({ name: "test", version: "0.0.0" });
+	await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:8787/mcp"), { fetch: fetchImpl }));
+	return { client, calls, deps };
+}
+
+/** Enkel KV i minnet. */
+export function memoryKv() {
+	const store = new Map<string, { value: string; ttl?: number }>();
+	return {
+		store,
+		gets: 0,
+		puts: 0,
+		async get(key: string, _type: "json") {
+			this.gets++;
+			const v = store.get(key);
+			return v ? JSON.parse(v.value) : null;
+		},
+		async put(key: string, value: string, options?: { expirationTtl?: number }) {
+			this.puts++;
+			store.set(key, { value, ttl: options?.expirationTtl });
+		},
+	};
 }

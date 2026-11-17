@@ -47,5 +47,19 @@ export function publicUrl(uuid: string): string {
 
 export const KALLA = "Riksantikvarieämbetet, Kulturmiljöregistret (CC0)";
 
-/** Hur länge värdelistorna cachas i minnet (per isolat). */
-export const DOMAIN_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+/**
+ * Hur länge värdelistorna cachas i minnet (per isolat). Framför KV-cachen
+ * (24 h, se cache/kv.ts); utan KV hämtas listorna från appen så här ofta.
+ */
+export const DOMAIN_CACHE_TTL_MS = 60 * 60 * 1000;
+
+/** Bilder upp till så här stora returneras som bildinnehåll i MCP-svaret (SPEC 6). */
+export const MAX_BILD_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Begränsning per användare (SPEC 9.2). Själva gränsen sätts i bindningen
+ * `RATE_LIMITER` (`simple.limit`/`simple.period`) i den lokala
+ * wrangler-konfigurationen; värdet här används bara i felmeddelandet och ska
+ * hållas i takt med den.
+ */
+export const RATE_LIMIT_PER_MINUTE = 120;

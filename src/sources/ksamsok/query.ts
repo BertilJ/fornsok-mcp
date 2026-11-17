@@ -37,17 +37,20 @@ function anyOf(index: string, values: readonly string[]): string {
 	return parts.length === 1 ? parts[0] : `(${parts.join(" OR ")})`;
 }
 
+/** Högst så många ord skickas till K-samsök (se sok_lamningar, som säger till om fler stryks). */
+export const MAX_ORD = 12;
+
 /**
  * Dela en fritextfråga i ord. Skiljetecken i ordens kanter tas bort; ord som
  * bara består av skiljetecken stryks. Varje ord blir ett eget `text="…"`.
+ * Begränsningen till `MAX_ORD` görs av anroparen.
  */
 export function splitWords(fraga: string): string[] {
 	return fraga
 		.normalize("NFC")
 		.split(/\s+/)
 		.map((w) => w.replace(/^[^\p{L}\p{N}*]+|[^\p{L}\p{N}*]+$/gu, ""))
-		.filter((w) => w.length > 0)
-		.slice(0, 12);
+		.filter((w) => w.length > 0);
 }
 
 function num(n: number): string {
@@ -67,9 +70,12 @@ export function buildQuery(f: ResolvedSearchFilter): string {
 	if (f.antikvarisk_bedomning?.length) parts.push(anyOf("itemSpecification", f.antikvarisk_bedomning));
 	if (f.kommun?.length) parts.push(anyOf("municipalityName", f.kommun));
 	if (f.socken?.length) {
-		const s = f.socken.map((x) =>
-			x.lan?.length ? `(${clause("parishName", x.namn)} AND ${anyOf("countyName", x.lan)})` : clause("parishName", x.namn),
-		);
+		const s = f.socken.map((x) => {
+			const parts = [clause("parishName", x.namn)];
+			if (x.lan?.length) parts.push(anyOf("countyName", x.lan));
+			if (x.kommun?.length) parts.push(anyOf("municipalityName", x.kommun));
+			return parts.length === 1 ? parts[0] : `(${parts.join(" AND ")})`;
+		});
 		parts.push(s.length === 1 ? s[0] : `(${s.join(" OR ")})`);
 	}
 	if (f.landskap?.length) parts.push(anyOf("provinceName", f.landskap));

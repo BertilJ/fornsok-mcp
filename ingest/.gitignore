@@ -1,0 +1,4 @@
+# Nedladdade GeoPackage-filer och lokala databaser
+.cache/
+# Genererade SQL-filer
+out/

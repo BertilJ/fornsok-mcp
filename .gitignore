@@ -178,3 +178,5 @@ dist
 .dev.env
 .local/
 .wrangler/
+# Driftkonfiguration med kontospecifika värden (mall: wrangler.local.example.jsonc)
+wrangler.local.jsonc

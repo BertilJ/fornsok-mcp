@@ -26,8 +26,17 @@ export interface AllowedCall {
 
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 export const UUID_RE = new RegExp(`^${UUID}$`);
-/** Ett filnamnssegment: inga snedstreck, inga kodade snedstreck/bakstreck. */
-const FILE_SEGMENT = "(?:[A-Za-z0-9._~\\-]|%(?!2[fF]|5[cC])[0-9A-Fa-f]{2})+";
+/**
+ * Fil-id i dokumentändpunkten: base64 (som appen ger det), där `+` och `=`
+ * är procentkodade. `/` (%2F) godtas aldrig.
+ */
+const FILE_ID_SEGMENT = "(?:[A-Za-z0-9]|%2[bB]|%3[dD]){1,200}";
+/**
+ * Filnamn: inga snedstreck, inga kodade snedstreck/bakstreck/nolltecken/procenttecken
+ * (dubbelkodning), och
+ * bara bildfiler (JPEG/PNG) – servern hämtar aldrig andra filtyper, de ges som länk.
+ */
+const IMAGE_FILE_SEGMENT = "(?:[A-Za-z0-9._~\\-]|%(?!2[fF]|5[cC]|00|25)[0-9A-Fa-f]{2}){1,300}\\.(?:[jJ][pP][eE]?[gG]|[pP][nN][gG])";
 const ANY = /^[\s\S]{0,4000}$/;
 const INT = /^\d{1,6}$/;
 
@@ -101,7 +110,7 @@ export const ALLOWED_CALLS: readonly AllowedCall[] = [
 		source: "fornsokapp",
 		method: "GET",
 		origin: "https://app.raa.se",
-		path: new RegExp(`^/open/fornsok/api/lamning/dokument/fil/${FILE_SEGMENT}/${FILE_SEGMENT}$`),
+		path: new RegExp(`^/open/fornsok/api/lamning/dokument/fil/${FILE_ID_SEGMENT}/${IMAGE_FILE_SEGMENT}$`),
 	},
 	{
 		id: "fornsokapp.lamning.domaner",

@@ -1,7 +1,7 @@
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/server";
 import { DisallowedCallError, SOURCE_NAMES, ToolInputError, UpstreamError } from "../errors";
 import type { DomainService } from "../lookup/domains";
-import type { IdResolver, NearbySource, RecordSource, SearchSource } from "../sources/types";
+import type { DocumentSource, HistorySource, IdResolver, NearbySource, RecordSource, SearchSource } from "../sources/types";
 
 /** Beroenden som verktygen får. Byts mot indexkällor i senare etapper. */
 export interface ToolDeps {
@@ -11,6 +11,10 @@ export interface ToolDeps {
 	records: Array<{ name: string; source: RecordSource }>;
 	nearby: NearbySource;
 	domains: DomainService;
+	/** Dokumentlistor och filer (Fornsök-appen). */
+	documents: DocumentSource;
+	/** Versionshistorik (Fornsök-appen). */
+	history: HistorySource;
 }
 
 export const READ_ONLY: ToolAnnotations = {

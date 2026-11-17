@@ -65,6 +65,8 @@ export interface NearbyLamning {
 	point: Planar;
 	geometrier: number;
 	geometrityper: string[];
+	/** Geometritypen för den geometri som ligger närmast. */
+	narmasteTyp: string;
 }
 
 /**
@@ -85,6 +87,7 @@ export function dedupeAndMeasure(center: Planar, features: readonly NearbyFeatur
 				point: near.point,
 				geometrier: 1,
 				geometrityper: [f.geometry.type],
+				narmasteTyp: f.geometry.type,
 			});
 		} else {
 			prev.geometrier++;
@@ -92,6 +95,7 @@ export function dedupeAndMeasure(center: Planar, features: readonly NearbyFeatur
 			if (near.distance < prev.distance) {
 				prev.distance = near.distance;
 				prev.point = near.point;
+				prev.narmasteTyp = f.geometry.type;
 			}
 		}
 	}
@@ -191,7 +195,8 @@ export async function lamningarNara(args: NaraArgs, deps: ToolDeps) {
 	const items = shown.map((l) => {
 		const f = l.feature;
 		const ll = toLatLon(l.point);
-		const inside = l.distance < 0.5;
+		// "Inom" har bara mening för ytor; en punkt eller linje man står på är 0 m bort, inte "inom".
+		const inside = l.distance < 0.5 && isAreal(l.narmasteTyp);
 		return {
 			lamningsnummer: f.lamningsnummer,
 			raa_nummer: f.raa_nummer,
@@ -202,7 +207,7 @@ export async function lamningarNara(args: NaraArgs, deps: ToolDeps) {
 			kommun: f.kommun,
 			lan: f.lan,
 			avstand_m: Math.round(l.distance),
-			vaderstreck: inside ? null : compassDirection(centerPlanar, l.point),
+			vaderstreck: l.distance < 0.5 ? null : compassDirection(centerPlanar, l.point),
 			inom_lamningen: inside,
 			geometrier: l.geometrier,
 			geometrityper: l.geometrityper,
@@ -235,7 +240,11 @@ export async function lamningarNara(args: NaraArgs, deps: ToolDeps) {
 			`${totalt} lämningar ${omrade} från ${center.lat.toFixed(5)}, ${center.lon.toFixed(5)}${filterText(args, lamningstyp)}; visar ${items.length}, närmast först. Källa: RAÄ:s OGC API Features.`,
 		);
 		items.forEach((it, i) => {
-			const lage = it.inom_lamningen ? "punkten ligger inom lämningen" : `${it.avstand_m} m ${it.vaderstreck ?? ""}`.trim();
+			const lage = it.inom_lamningen
+				? "punkten ligger inom lämningen"
+				: it.vaderstreck === null
+					? "0 m (punkten ligger på lämningen)"
+					: `${it.avstand_m} m ${it.vaderstreck}`;
 			const nr = [it.lamningsnummer, it.raa_nummer ? `(${it.raa_nummer})` : null].filter(Boolean).join(" ");
 			const namn = it.namn ? ` "${it.namn}"` : "";
 			lines.push(
@@ -252,4 +261,8 @@ function filterText(args: NaraArgs, typer?: string[]): string {
 	if (typer?.length) parts.push(`typ ${typer.join("/")}`);
 	if (args.antikvarisk_bedomning?.length) parts.push(args.antikvarisk_bedomning.join("/"));
 	return parts.length ? ` (${parts.join(", ")})` : "";
+}
+
+function isAreal(type: string): boolean {
+	return type === "Polygon" || type === "MultiPolygon";
 }

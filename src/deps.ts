@@ -1,7 +1,9 @@
 /**
- * Koppla ihop förmågorna med källorna. Etapp 1: bara levande källor.
- * Senare etapper lägger en indexkälla först i respektive kedja.
+ * Koppla ihop förmågorna med källorna. Etapp 1–2: bara levande källor, med
+ * valfri KV-cache för värdelistor och dokumentlistor. Senare etapper lägger en
+ * indexkälla först i respektive kedja.
  */
+import { type KvLike, KvDocumentSource, KvDomainSource } from "./cache/kv";
 import { userAgent } from "./config";
 import { DomainService } from "./lookup/domains";
 import { FornsokAppSource } from "./sources/fornsokapp/source";
@@ -13,15 +15,17 @@ import { UpstreamClient, type UpstreamClientOptions } from "./upstream/client";
 export interface LiveDepsOptions extends UpstreamClientOptions {
 	/** Kontaktväg i User-Agent (`CONTACT_URL`). */
 	contactUrl?: string | null;
+	/** KV-namnrymd för cache (`CACHE`), om den finns. */
+	kv?: KvLike;
 }
 
 export function createLiveDeps(options: LiveDepsOptions = {}): ToolDeps {
-	const { contactUrl, ...clientOptions } = options;
+	const { contactUrl, kv, ...clientOptions } = options;
 	const client = new UpstreamClient({ userAgent: userAgent(contactUrl), ...clientOptions });
 	const ksamsok = new KsamsokSource(client);
 	let domains: DomainService;
 	const app = new FornsokAppSource(client, () => domains.get());
-	domains = new DomainService(app);
+	domains = new DomainService(new KvDomainSource(app, kv));
 	return {
 		search: ksamsok,
 		ids: ksamsok,
@@ -31,5 +35,7 @@ export function createLiveDeps(options: LiveDepsOptions = {}): ToolDeps {
 		],
 		nearby: new OgcSource(client),
 		domains,
+		documents: new KvDocumentSource(app, kv),
+		history: app,
 	};
 }

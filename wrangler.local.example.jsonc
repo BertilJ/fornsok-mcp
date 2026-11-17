@@ -1,0 +1,71 @@
+/**
+ * MALL för driftsättning. Kopiera till `wrangler.local.jsonc` (ospårad, står i
+ * .gitignore), fyll i alla <PLATSHÅLLARE> och driftsätt med:
+ *
+ *   npx wrangler deploy -c wrangler.local.jsonc
+ *
+ * Den här mallen är spårad och får aldrig innehålla riktiga värden (SPEC 13).
+ * Den riktiga filen ersätter wrangler.jsonc helt – Wrangler slår inte ihop dem –
+ * så allt från wrangler.jsonc finns med här.
+ *
+ * Viktigt: fyll i resurs-id:n för D1 och KV. Saknas ett id kan Wrangler försöka
+ * skapa en ny resurs automatiskt vid deploy.
+ *
+ * För lokal utveckling används wrangler.jsonc (`npm run dev`), inte den här filen.
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "fornsok-mcp",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-07-02",
+	"compatibility_flags": ["nodejs_compat"],
+
+	// Kontot Workern driftsätts i.
+	"account_id": "<KONTO-ID>",
+
+	// Bara den egna domänen. workers.dev och förhandsadresser är avstängda (SPEC 9.3):
+	// Workern ska bara nås bakom Cloudflare Access.
+	"workers_dev": false,
+	"preview_urls": false,
+	"routes": [{ "pattern": "<VÄRDNAMN, t.ex. fornsok.example.se>", "custom_domain": true }],
+
+	"vars": {
+		// Kontaktväg i User-Agent mot RAÄ (SPEC 9.1).
+		"CONTACT_URL": "<DIN KONTAKTVÄG, https:// eller mailto:>",
+		// Cloudflare Access (SPEC 9.2). Utan båda svarar Workern 401 på allt.
+		"ACCESS_TEAM_DOMAIN": "<TEAM>.cloudflareaccess.com",
+		"ACCESS_AUD": "<AUD-TAGG FÖR ACCESS-APPLIKATIONEN>",
+		// ACCESS_DEV_BYPASS får INTE sättas här – bara i .dev.vars för lokal utveckling.
+	},
+
+	// Begränsning per användare (e-post ur Access-JWT, eller common_name för tjänstetoken).
+	// namespace_id: ett heltal (som sträng) du väljer, unikt i kontot – bindningar med
+	// samma namespace_id delar räknare, även mellan Workers. period får vara 10 eller 60.
+	// Håll `limit` i takt med RATE_LIMIT_PER_MINUTE i src/config.ts (används i felmeddelandet).
+	"ratelimits": [
+		{
+			"name": "RATE_LIMITER",
+			"namespace_id": "<HELTAL, unikt i kontot>",
+			"simple": { "limit": 120, "period": 60 },
+		},
+	],
+
+	// Cache för värdelistor (24 h) och dokumentlistor (1 h).
+	"kv_namespaces": [{ "binding": "CACHE", "id": "<KV-NAMNRYMDENS ID>" }],
+
+	// Indexet (kommande etapper). Koden fungerar utan dessa; de kan ligga kvar.
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "<D1-DATABASENS NAMN>",
+			"database_id": "<D1-DATABASENS ID>",
+			"migrations_dir": "migrations",
+		},
+	],
+	"vectorize": [{ "binding": "VECTORIZE", "index_name": "<VECTORIZE-INDEXETS NAMN>" }],
+	"ai": { "binding": "AI" },
+
+	"observability": {
+		"enabled": true,
+	},
+}

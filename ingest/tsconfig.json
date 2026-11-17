@@ -1,0 +1,14 @@
+{
+	// Typkontroll av ingest/ och testerna för index och inläsning:
+	//   npx tsc -p ingest/tsconfig.json
+	// (Rotens tsconfig omfattar bara src/.)
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		"target": "es2022",
+		"lib": ["es2022"],
+		"types": ["node"],
+		"allowImportingTsExtensions": true,
+		"noEmit": true
+	},
+	"include": ["./**/*.ts", "../test/store/**/*.ts", "../test/ingest/**/*.ts", "../worker-configuration.d.ts"]
+}
