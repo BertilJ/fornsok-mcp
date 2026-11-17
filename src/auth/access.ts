@@ -169,9 +169,12 @@ async function loadKeys(cache: KeyCache, deps: Required<Pick<AccessDeps, "fetch"
 	try {
 		const res = await deps.fetch(`https://${cache.teamHost}/cdn-cgi/access/certs`, {
 			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-			redirect: "error",
-		} as RequestInit);
-		if (!res.ok) throw new Error(`certs status ${res.status}`);
+			// Workers stöder inte redirect: "error"; "manual" returnerar 3xx-svaret oförändrat
+				// utan att följa det. Allt utom 200 (inkl. 3xx) är en misslyckad hämtning, så
+				// nycklar hämtas aldrig via en omdirigering.
+				redirect: "manual",
+		});
+		if (res.status !== 200) throw new Error(`certs status ${res.status}`);
 		const text = await res.text();
 		if (text.length > MAX_JWKS_BYTES) throw new Error("certs too large");
 		const body: unknown = JSON.parse(text);

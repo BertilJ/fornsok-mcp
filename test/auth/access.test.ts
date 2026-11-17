@@ -290,6 +290,46 @@ describe("verifyAccessRequest", () => {
 		await expect401(await verifyAccessRequest(req(tok), CONFIG, env.deps));
 	});
 
+	it("nycklar hämtas med redirect: manual (Workers stöder inte \"error\")", async () => {
+		const env = makeEnv([K1]);
+		await verifyAccessRequest(req(await sign(K1, claims())), CONFIG, env.deps);
+		const init = env.fetchMock.mock.calls[0]![1] as RequestInit | undefined;
+		expect(init?.redirect).toBe("manual");
+		expect(init?.signal).toBeInstanceOf(AbortSignal);
+	});
+
+	it.each([
+		[302, { location: "https://evil.example.com/certs" }],
+		[301, { location: "https://evil.example.com/certs" }],
+		[307, { location: "https://evil.example.com/certs" }],
+		[302, {}],
+	])("omdirigering (%i) är misslyckad hämtning: 401 och Location följs inte", async (status, headers) => {
+		const env = makeEnv([K1]);
+		// Ett följt svar skulle innehålla giltiga nycklar; ett 3xx får aldrig tolkas som sådant.
+		const body = JSON.stringify({ keys: [K1.jwk] });
+		env.fetchMock.mockImplementation(async () => new Response(body, { status, headers }));
+		await expect401(await verifyAccessRequest(req(await sign(K1, claims())), CONFIG, env.deps), "unknown key");
+		expect(env.fetchMock).toHaveBeenCalledTimes(1);
+		expect(env.fetchMock.mock.calls.map((c) => c[0])).toEqual([`https://${TEAM}/cdn-cgi/access/certs`]);
+	});
+
+	it("svar i Cloudflares verkliga form (extra fält, content-type med charset) fungerar", async () => {
+		const env = makeEnv([K1]);
+		const body = JSON.stringify({
+			keys: [K1.jwk, K2.jwk],
+			public_cert: { kid: "k1", cert: "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n" },
+			public_certs: [
+				{ kid: "k1", cert: "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n" },
+				{ kid: "k2", cert: "-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n" },
+			],
+		});
+		env.fetchMock.mockImplementation(
+			async () => new Response(body, { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }),
+		);
+		const r = await verifyAccessRequest(req(await sign(K2, claims())), CONFIG, env.deps);
+		expect(r.ok).toBe(true);
+	});
+
 	it("gamla nycklar behålls om omhämtning misslyckas", async () => {
 		const env = makeEnv([K1]);
 		const tok = async () => sign(K1, claims({ exp: nowS + 100000 }));
