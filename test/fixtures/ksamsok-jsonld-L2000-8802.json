@@ -1,0 +1,440 @@
+{
+    "@graph": [
+        {
+            "@id": "_:ff3aa72c7bd4cad5c1c8559ef837e24d",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Svenman, E. 2021. Arkeologisk schaktningsövervakning, Bergsgården och Grycksbo\nvid schaktning för överföringsledning i anslutning till lämningarna L1999:451, L2000:8802, L2000:9887, L2000:9888, Falu kommun, Dalarnas län. Dalarnas museum arkivrapport 169/19."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Referens: skriftlig källa"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:f9e977e05faae308fab8b60ce4c06eb4",
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Lämningsnummer"
+            },
+            "ksam:number": {
+                "@language": "sv",
+                "@value": "L2000:8802"
+            },
+            "@type": "ksam:ItemNumber"
+        },
+        {
+            "@id": "_:c70a5b99f5007fae8a5db7f604c2683a",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Hülphers Dagbok 1757."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Referens: skriftlig källa"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:6b42540749956756b9d52d14cf43a5b1",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Åverkan"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Skadestatus"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:6a25ce3c414743aa1a26756786d39dbf",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Dike/ränna - Typ: Kraftutvinning, antal 1.Husgrund, historisk tid - Verksamhet: Bergsbruk, antal 5.Hyttlämning - Material: Koppar, Typ: Hytta/ugn, antal 2.Hyttlämning - Material: Koppar, Typ: Slagg/Slaggvarp, antal 1.Hyttlämning - Material: Koppar, Typ: Rostningsplats, antal 3"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Ingående lämningar"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:f2d2106ffa61be2a9e33796550b4806b",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Pagoldh, M. 1992. Rapport efter dokumentation av skadade lämningar inom raä nr 172, Bergsgården, Stora Kopparbergs sn, Falu kommun, Kopparbergs län, Dalarna. Dalarnas museum Arkeologisk Rapport 1992:8. Falun. (RAÄ dnr 5985/91)"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Referens: skriftlig källa"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:c723bb9a6da83a3844adae4c088dd656",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Avsk av ATA utan angivande avkälla."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Referens: skriftlig källa"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:1263d450e4482bb9d17f38c50530e6e4",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Ant. av : Källstöm, Ingmar. 1929-06-20, nr 9."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Referens: skriftlig källa"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:d4405201e915670c6d50a50187f363de",
+            "ksam:spec": {
+                "@language": "sv",
+                "@value": "Fornlämning"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Antikvarisk bedömning"
+            },
+            "@type": "ksam:ItemSpecification"
+        },
+        {
+            "@id": "_:3a55c80509f14246314da04616201f26",
+            "ksam:spec": {
+                "@language": "sv",
+                "@value": "Bekräftad i fält"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Aktualitetsstatus"
+            },
+            "@type": "ksam:ItemSpecification"
+        },
+        {
+            "@id": "_:3e7af11dacc2558d75abf7da9e3f8c0b",
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "RAÄ-nummer"
+            },
+            "ksam:number": {
+                "@language": "sv",
+                "@value": "Stora Kopparberg 172:1"
+            },
+            "@type": "ksam:ItemNumber"
+        },
+        {
+            "@id": "_:f36dbd3db4ea26e3eccad4b8f02c2b07",
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Lämningstyp"
+            },
+            "ksam:name": {
+                "@language": "sv",
+                "@value": "Hyttområde"
+            },
+            "@type": "ksam:ItemName"
+        },
+        {
+            "@id": "_:73646711f23ad7f65bd1381937e008a5",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Synlig ovan mark"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Placering"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:b5d34d43161de2f06bb1231dfb67f17c",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Åravin (ÖSÖ-VNV) mellan två större sjöar. Skogsmark (blandskog) och tomtmark."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Terräng"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:689e71c5558c30aeb0417c228a601dfd",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Lögdqvist, Anna. 2005. Rapport. Arkeologisk schaktövervakning i samband med markarbeten för ledningar samt mindre byggnad för avloppsrening i Bergsgården, raä nr 172, Stora Kopparbergs socken, Falu kommun. Dalarnas museum. (RAÄ dnr 321-4330-2005)"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Referens: skriftlig källa"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:9bc0850ddacdc3ad045ee2c0dcf555ca",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Hyttområde, delundersökt. Ca 940x10-340 m (VNV-ÖSÖ) stort, bestående av kanalsystem, 2 hyttruiner, 2 rostungnar, grundrester och slaggområde. \nBelägen i områdets mitt, S om vattentub, är:\nKanalfåra, 28 m l (VNV-ÖSÖ), kallmurad, numera torrlagd.\nOmedelbart SV om kanalfåran är:\nHyttruin (1), 5x4 m (NNÖ-SSV) och intill 1 m h. Byggd av 0,5-1 m st skarpkantade stenar delvis  bevarad i kallmur. Invändigt är rikligt rödbränd sand och eldpåverkad sten.\nOmedelbart SÖ om hyttruin (1) är:\nHyttruin (2), 6x4 (VNV-ÖSÖ) och intill 0.5 m h. Bevarade grundstenar, delvis bildande 1,5 m br yttervägg av 0,2-1,2 m st, huvudsakligen huggen grå sten. I mitten är rester av hyttpipan (?) med bevarad bottensmälta.\nI anslutning till hyttruinerna finns flera grundlämningar, möjligen efter ytterbyggnad omslutande båda hyttorna.\nCa 10 m SSV om den hyttruin (2) är:\nRostanläggning (1), starkt raserad 16x5 m (ÖNÖ-VSV) och 0,8 m h. 6 eller 7 bås mot NNV. I SSÖ är rester efter takbärande stolpar. \nNNV om rostanläggning (1) är:\nMöjligen rester av en motsvarande rostugn (2) med bås åt SSÖ. Starkt avplanad.\nCa 10 m SÖ om rostugn (2) är:\nGrundrester, 5x4 resp. 9x6 m. Otydliga. \nOvan beskrivna lämningar är belägna i anslutning till varandra, S om ån i områdets mitt. \n\nCa 80 m NÖ om ovanstående grundrester och 15 m NNÖ om tuben är:\nRostanläggning (3), stark raserad, 15x5 m ( VNV-ÖSÖ) och 1 m h. Ca 5el 6 bås (?) vända åt S. Eventuellt en hyttruin?\nCa 40 m NNV om rostanläggning (3) är:\nGrundlämning, otydlig, ca 4 m diam. Övertäckt av jord och slagg. I ytan talrika stenar, 0,4-0,5 m st och rödbränd sand. Sannolikt hyttgrund.\n20 m V om ovanstående är:\nGrundlämning, otydlig, 3 m diam, med i ytan synliga enstaka stenar, 0,2-0,5 m st. Röd sand.\nCa 80 m Ö om förstnämnda grundlämning är:\nGrundlämning, starkt övertäckt, synlig i S delen av vägslänt, bestående av några stockar (ÖNÖ-VSV), delvis i timrat läge tillsammans med stenar. Hyttgrund?\nSlaggområde, ca 940x340 m (Ö-V) med till största delen sammanhängande kopparslaggvarp, beläget på båda sidor av åravinen och genomskuret av landsvägen. På några ställen i V delen intill 5 m h, i övrigt till största delen bortschaktat. Mörkbrun kopparslagg, 0,1-0,5 m st. På flera ställen inomslaggområdet finns röd sand och otydliga grundlämningar.\nEnl uppg i Källström 1929-06-20, nr 9 skall varpen ha varitintill 11 m h.\nLämningarna S om ån i områdets mitt, Everströmska hyttorna, undersökta och kartlagda 1933 (John Nihlén).\nOmrådets Ö del är ställvis mycket svåravgränsat. Ca 110 m SÖ om vägbro och på platsen för nyuppförd kraftversbyggnad har tidigare funnits en kvarn. Vid ledningsdragning för vattentub till kraftverk sommaren -91 söndergrävdes ca 7 rostar. Dessa har dokumenterats genom Dalarnas Museum. \nSkiss i inventeringsbok."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Beskrivning"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:d3c78dce50258766d7116278dc51d4dd",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Hyttplatsen är belägen vid flack åravin (VNV-ÖSÖ) i vars botten enställvis tvågrenad å rinner mot ÖSÖ. N om åravinen och parallellt med denna är en gammal landsväg (Falun-Rättvik)."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Orientering"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:daa30de430f5a168192aefdc364ccb6a",
+            "ksam:contextSuperType": {
+                "@id": "http://kulturarvsdata.se/resurser/ContextSuperType#create"
+            },
+            "ksam:countyName": {
+                "@language": "sv",
+                "@value": "Dalarna"
+            },
+            "ksam:coordinates": {
+                "@value": "<gml:MultiGeometry xmlns:gml=\"http://www.opengis.net/gml\" srsName=\"EPSG:4326\"><gml:geometryMember><gml:Point><gml:coordinates cs=\",\" decimal=\".\" ts=\" \">15.554018818384327,60.66159242831314</gml:coordinates></gml:Point></gml:geometryMember><gml:geometryMember><gml:Point><gml:coordinates cs=\",\" decimal=\".\" ts=\" \">15.553952581791098,60.661662286305834</gml:coordinates></gml:Point></gml:geometryMember><gml:geometryMember><gml:Polygon><gml:outerBoundaryIs><gml:LinearRing><gml:coordinates cs=\",\" decimal=\".\" ts=\" \">15.55212577043887,60.66345424169351 15.552440044509595,60.6634925861239 15.552652164721502,60.66346438019097 15.553025322733868,60.663389942767395 15.553361640428944,60.663396068660504 15.553840441481936,60.66342941121809 15.554004868599849,60.66345486778955 15.55413631682484,60.663505349234555 15.554245954552258,60.66351634324198 15.554384994084808,60.66348260090179 15.554531368577978,60.66343812558051 15.55465953982497,60.663375678544995 15.55474020389888,60.66330416227978 15.55482450980112,60.663238035981536 15.554886722122422,60.663220261030276 15.554945135670591,60.663240104079144 15.555083821610102,60.66331030748041 15.555186158690903,60.66332129506174 15.555442059793897,60.66332185911914 15.555730791537517,60.66334938381341 15.555899015966132,60.66333183286718 15.556286931894999,60.66321082500575 15.556528201758338,60.663214949404065 15.556659884815012,60.66319193772725 15.556762408482754,60.66314377244156 15.55693806273051,60.66309038271783 15.557223314559705,60.663060554511105 15.557523191817998,60.66303432807273 15.557585439896721,60.66299862148629 15.5576188730074,60.662839184295905 15.55762289807685,60.66272806656811 15.557810132440721,60.66248651719833 15.558022499723945,60.66238123852126 15.558377475496433,60.66226194201073 15.55881298769903,60.662119520881184 15.558922799443595,60.66207316411408 15.559084026133569,60.66196059105625 15.559292710149528,60.66186068592607 15.559779450743992,60.6616914800339 15.559805399757686,60.661582209932796 15.559714567623182,60.6614063669001 15.559601909740476,60.66119462883694 15.559638790483246,60.66109433655918 15.559894900501805,60.66102678861242 15.560469376365575,60.66085598324668 15.560809786226612,60.660716934384574 15.561066193883512,60.66054901130499 15.561308015778808,60.660375698855546 15.561586436952735,60.66018631344635 15.561893964878742,60.66003284537514 15.562260029416109,60.659868751579786 15.562348001999887,60.65979187563274 15.562260582403894,60.65968951865811 15.562136446673012,60.65964802897535 15.56193162518265,60.65968164248342 15.561657210281293,60.6597634842611 15.561324218627924,60.659873880502694 15.561144864957358,60.659948759381656 15.561009360620147,60.66003091553687 15.560928575598322,60.66014365687913 15.560866226129736,60.6602098298335 15.56065780794306,60.660227303961044 15.560321718422752,60.66015667539554 15.560018687258387,60.66004488458578 15.559697273492704,60.65995635263606 15.559364770581821,60.65991081081895 15.559338972040418,60.659977072802725 15.55919224852971,60.66013626534321 15.558873644931765,60.660311214253255 15.558657830675093,60.66035912659801 15.558321604910663,60.66033329673266 15.557839175266787,60.66030355889004 15.557462827545883,60.66024895601546 15.557316415468724,60.660311365004475 15.557235679970802,60.660409756091404 15.557184116840745,60.66052256208328 15.557136412244402,60.66058339293371 15.55706662911241,60.66068361487042 15.556887265242748,60.660751314151135 15.556715497613888,60.6607366031066 15.556550906468601,60.66076670106387 15.556477752273778,60.66078087697314 15.556338811911917,60.66078774822724 15.556236340370521,60.660821565232716 15.556184985929999,60.66087881048292 15.555928971876755,60.66091409087124 15.555727784592806,60.66095665833922 15.55557791249813,60.66095452375283 15.55532558615757,60.66098623216636 15.555182978539596,60.660989499056164 15.555142984987272,60.66093204928687 15.555132146493149,60.66089438417049 15.554788519109412,60.660893626353754 15.554719073836315,60.66088630018777 15.55475970352237,60.660762721277834 15.554778455294016,60.66062654624952 15.554574175084975,60.66049345884016 15.554175970756107,60.66042087234138 15.553861550247571,60.66043630537796 15.553726170030828,60.66046827229317 15.55351032940254,60.66052154561738 15.553356537626804,60.6606000613895 15.553140407420056,60.6607304164255 15.553008391215641,60.66085200188368 15.553044676148971,60.66093452681363 15.553146857839327,60.66098494152261 15.553226957150333,60.6610801158161 15.553402266757052,60.66112531693658 15.553537199426557,60.66122060563268 15.553354366438302,60.66123812422191 15.553068928082329,60.661328891602835 15.552768869079623,60.66141425076287 15.552534801333058,60.66144419056056 15.55249808069512,60.661488920703874 15.55257435592589,60.66163964366723 15.552475394990486,60.661711108425656 15.552197268378652,60.661801888652924 15.55216023317889,60.661936235187696 15.551991883687705,60.661993206908576 15.551797966855272,60.6620411615266 15.551695486198401,60.66206960587449 15.551490990035123,60.662008208634646 15.551399535036984,60.66202771856022 15.551424839404355,60.6621102172875 15.551424815689215,60.66211739126865 15.551241898543356,60.66215282854101 15.551022377447621,60.66220789070592 15.550850323054155,60.66227202317063 15.55073693579241,60.66229506164348 15.550488403131933,60.662276581985246 15.55029455440355,60.662303021464076 15.550078701842452,60.66234913331611 15.549749593238525,60.662373487797424 15.549351000454365,60.662406638196224 15.548996159824256,60.66247571989043 15.548703349126365,60.66257542383048 15.54857865781646,60.66268805908478 15.5484900884453,60.662922654897706 15.548474650215907,60.66315203090548 15.54837514329566,60.66337942570383 15.548286950110088,60.66350289200758 15.548059973433663,60.66358840817183 15.547803738108499,60.66368461140616 15.547540145479505,60.66378616851705 15.547426615015285,60.663843260470315 15.547419129762243,60.66388626251196 15.54749575093767,60.66393124620619 15.5476822988247,60.663902991088726 15.547832257686123,60.6638836125542 15.548142724401897,60.66396498102168 15.548482975729073,60.6638922712104 15.548581714013862,60.66388533040705 15.54887032929739,60.66394154792701 15.549360560955849,60.66384766918854 15.549569093406307,60.66379974796553 15.549630688345786,60.663805636544346 15.549690739200475,60.663806808702454 15.549703188758226,60.663798685866425 15.549717731395202,60.66379957790498 15.549750215259518,60.6637742596689 15.549777407663056,60.66377984944125 15.549813000963134,60.66378345636981 15.549862379776648,60.66378325364735 15.549911742362976,60.663782099244436 15.549931212146715,60.66378867242343 15.549942821502901,60.66378814888872 15.55002123691411,60.66378687514445 15.55006847179049,60.6637757542258 15.550087603413418,60.66376142664994 15.550098872345021,60.66374094512902 15.550125021464963,60.66374007454253 15.550289687694912,60.663693840770215 15.550439884256837,60.66360277339025 15.550604183870444,60.66366588181981 15.550757565878468,60.663716411069906 15.551046153552706,60.66378158464023 15.551459267676869,60.66377714578831 15.55153575146268,60.66386513512885 15.551751546855668,60.66383873814901 15.551883556356826,60.66372432794146 15.55212577043887,60.66345424169351</gml:coordinates></gml:LinearRing></gml:outerBoundaryIs></gml:Polygon></gml:geometryMember></gml:MultiGeometry>",
+                "@type": "rdf:XMLLiteral"
+            },
+            "ksam:province": {
+                "@id": "http://kulturarvsdata.se/resurser/aukt/geo/province#Dr"
+            },
+            "ksam:municipality": {
+                "@id": "http://kulturarvsdata.se/resurser/aukt/geo/municipality#2080"
+            },
+            "ksam:contextLabel": {
+                "@language": "sv",
+                "@value": "Belägen"
+            },
+            "ksam:provinceName": {
+                "@language": "sv",
+                "@value": "Dalarna"
+            },
+            "ksam:contextType": {
+                "@id": "http://kulturarvsdata.se/resurser/ContextType#produce"
+            },
+            "ksam:municipalityName": {
+                "@language": "sv",
+                "@value": "Falun"
+            },
+            "@type": "ksam:Context",
+            "ksam:parish": {
+                "@id": "http://kulturarvsdata.se/resurser/aukt/geo/parish#2376"
+            },
+            "ksam:county": {
+                "@id": "http://kulturarvsdata.se/resurser/aukt/geo/county#20"
+            },
+            "ksam:parishName": {
+                "@language": "sv",
+                "@value": "Stora Kopparberg"
+            }
+        },
+        {
+            "@id": "_:2e47449534665445657600f5b848541b",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Lögdqvist, A. 2013. Arkeologisk schaktövervakning, Bergsgården, grävning för elkabel genom hyttområde RAÄ 172 i Stora Kopparbergs socken, Falu kommun, Dalarna. Dalarnas museum. Rapport 2013:9. (RAÄ dnr 3.4.2-389-2013)"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Referens: skriftlig källa"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:47ef1cc370adfc626e2c770de17f6bbe",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "ATA, dnr 1133/86."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Referens: skriftlig källa"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:fc8276d3245e424e5cb7787438bded2f",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Delundersökt"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Undersökningsstatus"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "http://kulturarvsdata.se/raa/lamning/6d1cf7b6-f5bd-4066-aba6-fb1ea3ce8c75",
+            "ksam:itemNumber": [
+                {
+                    "@id": "_:f9e977e05faae308fab8b60ce4c06eb4"
+                },
+                {
+                    "@id": "_:3e7af11dacc2558d75abf7da9e3f8c0b"
+                }
+            ],
+            "ksam:serviceOrganizationFull": "Riksantikvarieämbetet",
+            "ksam:url": "https://app.raa.se/open/fornsok/lamning/6d1cf7b6-f5bd-4066-aba6-fb1ea3ce8c75",
+            "ksam:itemDescription": [
+                {
+                    "@id": "_:c723bb9a6da83a3844adae4c088dd656"
+                },
+                {
+                    "@id": "_:73646711f23ad7f65bd1381937e008a5"
+                },
+                {
+                    "@id": "_:ff3aa72c7bd4cad5c1c8559ef837e24d"
+                },
+                {
+                    "@id": "_:47ef1cc370adfc626e2c770de17f6bbe"
+                },
+                {
+                    "@id": "_:b5d34d43161de2f06bb1231dfb67f17c"
+                },
+                {
+                    "@id": "_:c70a5b99f5007fae8a5db7f604c2683a"
+                },
+                {
+                    "@id": "_:1263d450e4482bb9d17f38c50530e6e4"
+                },
+                {
+                    "@id": "_:fc8276d3245e424e5cb7787438bded2f"
+                },
+                {
+                    "@id": "_:689e71c5558c30aeb0417c228a601dfd"
+                },
+                {
+                    "@id": "_:6b42540749956756b9d52d14cf43a5b1"
+                },
+                {
+                    "@id": "_:f2d2106ffa61be2a9e33796550b4806b"
+                },
+                {
+                    "@id": "_:6a25ce3c414743aa1a26756786d39dbf"
+                },
+                {
+                    "@id": "_:d3c78dce50258766d7116278dc51d4dd"
+                },
+                {
+                    "@id": "_:9bc0850ddacdc3ad045ee2c0dcf555ca"
+                },
+                {
+                    "@id": "_:2e47449534665445657600f5b848541b"
+                }
+            ],
+            "ksam:itemLicense": {
+                "@id": "http://kulturarvsdata.se/resurser/license#cc0"
+            },
+            "dcterms:replaces": [
+                {
+                    "@id": "http://kulturarvsdata.se/raa/fmi/11120000004669"
+                },
+                {
+                    "@id": "http://kulturarvsdata.se/raa/fmi/10237601720001"
+                },
+                {
+                    "@id": "http://kulturarvsdata.se/raa/fmi/11120000004670"
+                },
+                {
+                    "@id": "http://kulturarvsdata.se/raa/fmi/11120000004668"
+                },
+                {
+                    "@id": "http://kulturarvsdata.se/raa/fmi/11120000004666"
+                },
+                {
+                    "@id": "http://kulturarvsdata.se/raa/fmi/11120000004667"
+                }
+            ],
+            "ksam:itemLicenseUrl": {
+                "@id": "http://creativecommons.org/publicdomain/zero/1.0/"
+            },
+            "ksam:buildDate": "2026-11-14",
+            "ksam:ksamsokVersion": "1.11",
+            "ksam:itemSpecification": [
+                {
+                    "@id": "_:3a55c80509f14246314da04616201f26"
+                },
+                {
+                    "@id": "_:d4405201e915670c6d50a50187f363de"
+                }
+            ],
+            "ksam:serviceOrganization": {
+                "@language": "sv",
+                "@value": "RAÄ"
+            },
+            "ksam:itemClassName": {
+                "@language": "sv",
+                "@value": "Hyttområde"
+            },
+            "ksam:subject": [
+                {
+                    "@id": "http://kulturarvsdata.se/resurser/Subject#archaeology"
+                },
+                {
+                    "@id": "http://kulturarvsdata.se/resurser/Subject#site"
+                }
+            ],
+            "ksam:context": {
+                "@id": "_:daa30de430f5a168192aefdc364ccb6a"
+            },
+            "ksam:mediaType": "text/plain",
+            "ksam:itemName": {
+                "@id": "_:f36dbd3db4ea26e3eccad4b8f02c2b07"
+            },
+            "@type": "ksam:Entity",
+            "ksam:itemType": {
+                "@id": "http://kulturarvsdata.se/resurser/EntityType#monument"
+            },
+            "ksam:itemSuperType": {
+                "@id": "http://kulturarvsdata.se/resurser/EntitySuperType#object"
+            },
+            "ksam:serviceName": "kmr_lamningar",
+            "ksam:presentation": {
+                "@value": "<pres:item xmlns:pres=\"http://kulturarvsdata.se/presentation#\"><georss:where xmlns:georss=\"http://www.georss.org/georss\"><gml:Point xmlns:gml=\"http://www.opengis.net/gml\" srsName=\"EPSG:4326\"><gml:coordinates cs=\",\" decimal=\".\" ts=\" \">15.554018818384327,60.66159242831314</gml:coordinates></gml:Point></georss:where><pres:buildDate>2026-11-14</pres:buildDate><pres:context><pres:event>Belägen</pres:event><pres:placeLabel>Sverige, Dalarna, Falun, Dalarna, Stora Kopparberg</pres:placeLabel></pres:context><pres:dataQuality>http://kulturarvsdata.se/resurser/DataQuality#raw</pres:dataQuality><pres:description>Hyttområde, delundersökt. Ca 940x10-340 m (VNV-ÖSÖ) stort, bestående av kanalsystem, 2 hyttruiner, 2 rostungnar, grundrester och slaggområde. \nBelägen i områdets mitt, S om vattentub, är:\nKanalfåra, 28 m l (VNV-ÖSÖ), kallmurad, numera torrlagd.\nOmedelbart SV om kanalfåran är:\nHyttruin (1), 5x4 m (NNÖ-SSV) och intill 1 m h. Byggd av 0,5-1 m st skarpkantade stenar delvis  bevarad i kallmur. Invändigt är rikligt rödbränd sand och eldpåverkad sten.\nOmedelbart SÖ om hyttruin (1) är:\nHyttruin (2), 6x4 (VNV-ÖSÖ) och intill 0.5 m h. Bevarade grundstenar, delvis bildande 1,5 m br yttervägg av 0,2-1,2 m st, huvudsakligen huggen grå sten. I mitten är rester av hyttpipan (?) med bevarad bottensmälta.\nI anslutning till hyttruinerna finns flera grundlämningar, möjligen efter ytterbyggnad omslutande båda hyttorna.\nCa 10 m SSV om den hyttruin (2) är:\nRostanläggning (1), starkt raserad 16x5 m (ÖNÖ-VSV) och 0,8 m h. 6 eller 7 bås mot NNV. I SSÖ är rester efter takbärande stolpar. \nNNV om rostanläggning (1) är:\nMöjligen rester av en motsvarande rostugn (2) med bås åt SSÖ. Starkt avplanad.\nCa 10 m SÖ om rostugn (2) är:\nGrundrester, 5x4 resp. 9x6 m. Otydliga. \nOvan beskrivna lämningar är belägna i anslutning till varandra, S om ån i områdets mitt. \n\nCa 80 m NÖ om ovanstående grundrester och 15 m NNÖ om tuben är:\nRostanläggning (3), stark raserad, 15x5 m ( VNV-ÖSÖ) och 1 m h. Ca 5el 6 bås (?) vända åt S. Eventuellt en hyttruin?\nCa 40 m NNV om rostanläggning (3) är:\nGrundlämning, otydlig, ca 4 m diam. Övertäckt av jord och slagg. I ytan talrika stenar, 0,4-0,5 m st och rödbränd sand. Sannolikt hyttgrund.\n20 m V om ovanstående är:\nGrundlämning, otydlig, 3 m diam, med i ytan synliga enstaka stenar, 0,2-0,5 m st. Röd sand.\nCa 80 m Ö om förstnämnda grundlämning är:\nGrundlämning, starkt övertäckt, synlig i S delen av vägslänt, bestående av några stockar (ÖNÖ-VSV), delvis i timrat läge tillsammans med stenar. Hyttgrund?\nSlaggområde, ca 940x340 m (Ö-V) med till största delen sammanhängande kopparslaggvarp, beläget på båda sidor av åravinen och genomskuret av landsvägen. På några ställen i V delen intill 5 m h, i övrigt till största delen bortschaktat. Mörkbrun kopparslagg, 0,1-0,5 m st. På flera ställen inomslaggområdet finns röd sand och otydliga grundlämningar.\nEnl uppg i Källström 1929-06-20, nr 9 skall varpen ha varitintill 11 m h.\nLämningarna S om ån i områdets mitt, Everströmska hyttorna, undersökta och kartlagda 1933 (John Nihlén).\nOmrådets Ö del är ställvis mycket svåravgränsat. Ca 110 m SÖ om vägbro och på platsen för nyuppförd kraftversbyggnad har tidigare funnits en kvarn. Vid ledningsdragning för vattentub till kraftverk sommaren -91 söndergrävdes ca 7 rostar. Dessa har dokumenterats genom Dalarnas Museum. \nSkiss i inventeringsbok.</pres:description><pres:entityUri>http://kulturarvsdata.se/raa/lamning/6d1cf7b6-f5bd-4066-aba6-fb1ea3ce8c75</pres:entityUri><pres:id>6d1cf7b6-f5bd-4066-aba6-fb1ea3ce8c75</pres:id><pres:idLabel>L2000:8802</pres:idLabel><pres:itemLabel>Hyttområde</pres:itemLabel><pres:organization>Riksantikvarieämbetet</pres:organization><pres:organizationShort>RAÄ</pres:organizationShort><pres:references></pres:references><pres:representations><pres:representation format=\"HTML\">http://kulturarvsdata.se/raa/lamning/HTML/6d1cf7b6-f5bd-4066-aba6-fb1ea3ce8c75</pres:representation><pres:representation format=\"presentation\">http://kulturarvsdata.se/raa/lamning/XML/6d1cf7b6-f5bd-4066-aba6-fb1ea3ce8c75</pres:representation><pres:representation format=\"RDF\">http://kulturarvsdata.se/raa/lamning/RDF/6d1cf7b6-f5bd-4066-aba6-fb1ea3ce8c75</pres:representation></pres:representations><pres:service>kmr_lamningar</pres:service><pres:type>Kulturlämning</pres:type><pres:version>1.11</pres:version></pres:item>",
+                "@type": "rdf:XMLLiteral"
+            },
+            "ksam:itemLabel": {
+                "@language": "sv",
+                "@value": "Hyttområde"
+            },
+            "ksam:dataQuality": {
+                "@id": "http://kulturarvsdata.se/resurser/DataQuality#raw"
+            },
+            "ksam:lastChangedDate": "2022-07-18"
+        }
+    ],
+    "@context": {
+        "pres": "http://kulturarvsdata.se/presentation#",
+        "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        "owl": "http://www.w3.org/2002/07/owl#",
+        "ksam": "http://kulturarvsdata.se/ksamsok#",
+        "gml": "http://www.opengis.net/gml",
+        "georss": "http://www.georss.org/georss",
+        "dcterms": "http://purl.org/dc/terms/",
+        "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+        "dc": "http://purl.org/dc/elements/1.1/"
+    }
+}

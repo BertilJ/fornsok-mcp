@@ -1,0 +1,258 @@
+{
+    "@graph": [
+        {
+            "@id": "_:17a667453a64247627b1d82d7c8a06c0",
+            "ksam:spec": {
+                "@language": "sv",
+                "@value": "Fornlämning"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Antikvarisk bedömning"
+            },
+            "@type": "ksam:ItemSpecification"
+        },
+        {
+            "@id": "_:098e9b8269055eb08678cc5e8c7f6036",
+            "ksam:contextLabel": {
+                "@language": "sv",
+                "@value": "Belägen"
+            },
+            "ksam:parish": {
+                "@id": "http://kulturarvsdata.se/resurser/aukt/geo/parish#2566"
+            },
+            "ksam:county": {
+                "@id": "http://kulturarvsdata.se/resurser/aukt/geo/county#23"
+            },
+            "ksam:parishName": {
+                "@language": "sv",
+                "@value": "Stugun"
+            },
+            "ksam:contextType": {
+                "@id": "http://kulturarvsdata.se/resurser/ContextType#produce"
+            },
+            "@type": "ksam:Context",
+            "ksam:provinceName": {
+                "@language": "sv",
+                "@value": "Jämtland"
+            },
+            "ksam:contextSuperType": {
+                "@id": "http://kulturarvsdata.se/resurser/ContextSuperType#create"
+            },
+            "ksam:coordinates": {
+                "@value": "<gml:MultiLineString xmlns:gml=\"http://www.opengis.net/gml\" srsName=\"EPSG:4326\"><gml:lineStringMember><gml:LineString><gml:coordinates cs=\",\" decimal=\".\" ts=\" \">15.665686207912765,63.20285984679414 15.665851653001967,63.20264326789431 15.665909400852684,63.20245870582939 15.66594923493503,63.20210370427055 15.665956904665174,63.20177911835017 15.66590532106534,63.20142208569261 15.665793040026783,63.20116174190554 15.665672158898696,63.20095877307347 15.665570209365395,63.20083476175424 15.665420031107685,63.20076263843645</gml:coordinates></gml:LineString></gml:lineStringMember></gml:MultiLineString>",
+                "@type": "rdf:XMLLiteral"
+            },
+            "ksam:province": {
+                "@id": "http://kulturarvsdata.se/resurser/aukt/geo/province#Jä"
+            },
+            "ksam:municipalityName": {
+                "@language": "sv",
+                "@value": "Ragunda"
+            },
+            "ksam:municipality": {
+                "@id": "http://kulturarvsdata.se/resurser/aukt/geo/municipality#2303"
+            },
+            "ksam:countyName": {
+                "@language": "sv",
+                "@value": "Jämtland"
+            }
+        },
+        {
+            "@id": "_:0803f0b2c2920df1ad996fb9b13c8688",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Ej synlig ovan mark"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Placering"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:34909c48aa709eb79e6d98000b8ac835",
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Lämningsnummer"
+            },
+            "ksam:number": {
+                "@language": "sv",
+                "@value": "L1946:7415"
+            },
+            "@type": "ksam:ItemNumber"
+        },
+        {
+            "@id": "_:a4742839bce66746c3102d0038c2865d",
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Lämningstyp"
+            },
+            "ksam:name": {
+                "@language": "sv",
+                "@value": "Boplats"
+            },
+            "@type": "ksam:ItemName"
+        },
+        {
+            "@id": "_:1fc743405e41fbe4f43d5ce3eb48e1d7",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Beskrivningen är inte kvalitetssäkrad. Information kan saknas, vara felaktig eller inaktuell. Se även Inventeringsbok."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Beskrivning"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:90db60975bc41c52674f82796842091d",
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "RAÄ-nummer"
+            },
+            "ksam:number": {
+                "@language": "sv",
+                "@value": "Stugun 114:1"
+            },
+            "@type": "ksam:ItemNumber"
+        },
+        {
+            "@id": "http://kulturarvsdata.se/raa/lamning/bfe10d94-5d11-4943-8085-4b1bfcaacf64",
+            "ksam:itemLabel": {
+                "@language": "sv",
+                "@value": "Boplats"
+            },
+            "ksam:itemDescription": [
+                {
+                    "@id": "_:2d00c09cae1ff2495c7c0cfda2dbec7a"
+                },
+                {
+                    "@id": "_:31f19ee0da07ee7b9f28644b6802e6ff"
+                },
+                {
+                    "@id": "_:0803f0b2c2920df1ad996fb9b13c8688"
+                },
+                {
+                    "@id": "_:1fc743405e41fbe4f43d5ce3eb48e1d7"
+                }
+            ],
+            "ksam:itemSpecification": [
+                {
+                    "@id": "_:17a667453a64247627b1d82d7c8a06c0"
+                },
+                {
+                    "@id": "_:2c4191a6af0b6bc779684fde41e136bd"
+                }
+            ],
+            "ksam:itemClassName": {
+                "@language": "sv",
+                "@value": "Boplats"
+            },
+            "ksam:subject": [
+                {
+                    "@id": "http://kulturarvsdata.se/resurser/Subject#site"
+                },
+                {
+                    "@id": "http://kulturarvsdata.se/resurser/Subject#archaeology"
+                }
+            ],
+            "ksam:itemName": {
+                "@id": "_:a4742839bce66746c3102d0038c2865d"
+            },
+            "ksam:lastChangedDate": "2018-11-20",
+            "ksam:presentation": {
+                "@value": "<pres:item xmlns:pres=\"http://kulturarvsdata.se/presentation#\"><georss:where xmlns:georss=\"http://www.georss.org/georss\"><gml:Point xmlns:gml=\"http://www.opengis.net/gml\" srsName=\"EPSG:4326\"><gml:coordinates cs=\",\" decimal=\".\" ts=\" \">15.66582921654753,63.20176596079985</gml:coordinates></gml:Point></georss:where><pres:buildDate>2026-11-14</pres:buildDate><pres:context><pres:event>Belägen</pres:event><pres:placeLabel>Sverige, Jämtland, Ragunda, Jämtland, Stugun</pres:placeLabel></pres:context><pres:dataQuality>http://kulturarvsdata.se/resurser/DataQuality#raw</pres:dataQuality><pres:description>Beskrivningen är inte kvalitetssäkrad. Information kan saknas, vara felaktig eller inaktuell. Se även Inventeringsbok.</pres:description><pres:entityUri>http://kulturarvsdata.se/raa/lamning/bfe10d94-5d11-4943-8085-4b1bfcaacf64</pres:entityUri><pres:id>bfe10d94-5d11-4943-8085-4b1bfcaacf64</pres:id><pres:idLabel>L1946:7415</pres:idLabel><pres:itemLabel>Boplats</pres:itemLabel><pres:organization>Riksantikvarieämbetet</pres:organization><pres:organizationShort>RAÄ</pres:organizationShort><pres:references></pres:references><pres:representations><pres:representation format=\"HTML\">http://kulturarvsdata.se/raa/lamning/HTML/bfe10d94-5d11-4943-8085-4b1bfcaacf64</pres:representation><pres:representation format=\"presentation\">http://kulturarvsdata.se/raa/lamning/XML/bfe10d94-5d11-4943-8085-4b1bfcaacf64</pres:representation><pres:representation format=\"RDF\">http://kulturarvsdata.se/raa/lamning/RDF/bfe10d94-5d11-4943-8085-4b1bfcaacf64</pres:representation></pres:representations><pres:service>kmr_lamningar</pres:service><pres:type>Kulturlämning</pres:type><pres:version>1.11</pres:version></pres:item>",
+                "@type": "rdf:XMLLiteral"
+            },
+            "dcterms:replaces": {
+                "@id": "http://kulturarvsdata.se/raa/fmi/10256601140001"
+            },
+            "ksam:dataQuality": {
+                "@id": "http://kulturarvsdata.se/resurser/DataQuality#raw"
+            },
+            "ksam:mediaType": "text/plain",
+            "ksam:serviceName": "kmr_lamningar",
+            "ksam:itemLicenseUrl": {
+                "@id": "http://creativecommons.org/publicdomain/zero/1.0/"
+            },
+            "ksam:buildDate": "2026-11-14",
+            "@type": "ksam:Entity",
+            "ksam:itemSuperType": {
+                "@id": "http://kulturarvsdata.se/resurser/EntitySuperType#object"
+            },
+            "ksam:serviceOrganizationFull": "Riksantikvarieämbetet",
+            "ksam:itemLicense": {
+                "@id": "http://kulturarvsdata.se/resurser/license#cc0"
+            },
+            "ksam:url": "https://app.raa.se/open/fornsok/lamning/bfe10d94-5d11-4943-8085-4b1bfcaacf64",
+            "ksam:context": {
+                "@id": "_:098e9b8269055eb08678cc5e8c7f6036"
+            },
+            "ksam:itemNumber": [
+                {
+                    "@id": "_:90db60975bc41c52674f82796842091d"
+                },
+                {
+                    "@id": "_:34909c48aa709eb79e6d98000b8ac835"
+                }
+            ],
+            "ksam:itemType": {
+                "@id": "http://kulturarvsdata.se/resurser/EntityType#monument"
+            },
+            "ksam:ksamsokVersion": "1.11",
+            "ksam:serviceOrganization": {
+                "@language": "sv",
+                "@value": "RAÄ"
+            }
+        },
+        {
+            "@id": "_:2d00c09cae1ff2495c7c0cfda2dbec7a",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Okänd"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Undersökningsstatus"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:31f19ee0da07ee7b9f28644b6802e6ff",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Okänd"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Skadestatus"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:2c4191a6af0b6bc779684fde41e136bd",
+            "ksam:spec": {
+                "@language": "sv",
+                "@value": "Bekräftad i fält"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Aktualitetsstatus"
+            },
+            "@type": "ksam:ItemSpecification"
+        }
+    ],
+    "@context": {
+        "pres": "http://kulturarvsdata.se/presentation#",
+        "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        "owl": "http://www.w3.org/2002/07/owl#",
+        "ksam": "http://kulturarvsdata.se/ksamsok#",
+        "gml": "http://www.opengis.net/gml",
+        "georss": "http://www.georss.org/georss",
+        "dcterms": "http://purl.org/dc/terms/",
+        "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+        "dc": "http://purl.org/dc/elements/1.1/"
+    }
+}

@@ -1,0 +1,27 @@
+/**
+ * Wrangler-konfiguration för Fornsök MCP.
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ *
+ * Etapp 1 körs bara lokalt (`npm run dev`). workers.dev och förhandsadresser
+ * är avstängda redan nu (SPEC 9.3); egen domän och Access läggs till i etapp 1b.
+ * Bindningar för D1, Vectorize, KV m.m. läggs till i senare etapper.
+ *
+ * Förvaret är publikt: inga konto-id, resurs-id:n, domäner eller e-postadresser
+ * här (SPEC 13). Driftsättarens egna värden hålls i en ospårad lokal fil.
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "fornsok-mcp",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-07-02",
+	"compatibility_flags": ["nodejs_compat"],
+	"workers_dev": false,
+	"preview_urls": false,
+	"vars": {
+		// Kontaktväg i User-Agent mot RAÄ (SPEC 9.1). Sätt till din egen vid driftsättning.
+		"CONTACT_URL": "https://github.com/BertilJ/fornsok-mcp",
+	},
+	"observability": {
+		"enabled": true,
+	},
+}

@@ -1,0 +1,322 @@
+{
+    "@graph": [
+        {
+            "@id": "_:3f4892f7fda0e5e701a4771b3dc06672",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Synlig ovan mark"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Placering"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:1860d7345a53de9e7a95be36b6d53d52",
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Lämningstyp"
+            },
+            "ksam:name": {
+                "@language": "sv",
+                "@value": "Källa med tradition"
+            },
+            "@type": "ksam:ItemName"
+        },
+        {
+            "@id": "_:088ec84a70aef42fb24558cda492cfe4",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Forsslund, K-E.: Med Dalälven från källorna till havet, Bjursås och Ål, 1923."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Referens: skriftlig källa"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:756f99a1f91207a7cd9b5ecbc173cf63",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Omedelbart Ö om stig (N-S) och 28 m 30 gon om N hörnet av uthus."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Orientering"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:b4422ec262cf233fab94acf717e0c0a2",
+            "ksam:spec": {
+                "@language": "sv",
+                "@value": "Övrig kulturhistorisk lämning"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Antikvarisk bedömning"
+            },
+            "@type": "ksam:ItemSpecification"
+        },
+        {
+            "@id": "_:298d15dd0d30d26d196012bf93ec96b2",
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "RAÄ-nummer"
+            },
+            "ksam:number": {
+                "@language": "sv",
+                "@value": "Bjursås 27:1"
+            },
+            "@type": "ksam:ItemNumber"
+        },
+        {
+            "@id": "_:ab9afc5a23b0281d24d65bb452eae40c",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Måttlig NÖ-sluttning. Moränmark. Skogsmark (blandskog)."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Terräng"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:fcee4e421ed1c9ae223a00312c1e367f",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Trefaldighetskälla, oval, 1.5x1 m (NNÖ-SSV) och 0.14 m dj. Stensatt, med 0.3-0.4 mst stenar. Utlopp mot Ö-NÖ. På 1930-talet besöktes källan av enstaka personer.Nämns av Karl-Erik Forsslund. Beskrivningen är inte kvalitetssäkrad. Information kan saknas, vara felaktig eller inaktuell. Se även Inventeringsbok."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Beskrivning"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:9c8810155a7f926de5ac667d86618c32",
+            "ksam:spec": {
+                "@language": "sv",
+                "@value": "Bekräftad i fält"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Aktualitetsstatus"
+            },
+            "@type": "ksam:ItemSpecification"
+        },
+        {
+            "@id": "_:19918e7d8243c0657951b074d2b93c76",
+            "ksam:province": {
+                "@id": "http://kulturarvsdata.se/resurser/aukt/geo/province#Dr"
+            },
+            "ksam:municipalityName": {
+                "@language": "sv",
+                "@value": "Falun"
+            },
+            "ksam:parish": {
+                "@id": "http://kulturarvsdata.se/resurser/aukt/geo/parish#2342"
+            },
+            "ksam:contextSuperType": {
+                "@id": "http://kulturarvsdata.se/resurser/ContextSuperType#create"
+            },
+            "ksam:county": {
+                "@id": "http://kulturarvsdata.se/resurser/aukt/geo/county#20"
+            },
+            "ksam:contextLabel": {
+                "@language": "sv",
+                "@value": "Belägen"
+            },
+            "ksam:provinceName": {
+                "@language": "sv",
+                "@value": "Dalarna"
+            },
+            "ksam:countyName": {
+                "@language": "sv",
+                "@value": "Dalarna"
+            },
+            "ksam:municipality": {
+                "@id": "http://kulturarvsdata.se/resurser/aukt/geo/municipality#2080"
+            },
+            "ksam:parishName": {
+                "@language": "sv",
+                "@value": "Bjursås"
+            },
+            "ksam:coordinates": {
+                "@value": "<gml:MultiPoint xmlns:gml=\"http://www.opengis.net/gml\" srsName=\"EPSG:4326\"><gml:pointMember><gml:Point><gml:coordinates cs=\",\" decimal=\".\" ts=\" \">15.456428761252013,60.73368161435678</gml:coordinates></gml:Point></gml:pointMember></gml:MultiPoint>",
+                "@type": "rdf:XMLLiteral"
+            },
+            "@type": "ksam:Context",
+            "ksam:contextType": {
+                "@id": "http://kulturarvsdata.se/resurser/ContextType#produce"
+            }
+        },
+        {
+            "@id": "_:d8af51348dbc59c0ba46e2b0f63efc4b",
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Lämningsnummer"
+            },
+            "ksam:number": {
+                "@language": "sv",
+                "@value": "L2001:646"
+            },
+            "@type": "ksam:ItemNumber"
+        },
+        {
+            "@id": "_:f9898b548bba8b62b6ecf01e941dc8b8",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Okänd"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Undersökningsstatus"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "_:b959314a5bbafad0e4b4398dea777139",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Okänd"
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Skadestatus"
+            },
+            "@type": "ksam:ItemDescription"
+        },
+        {
+            "@id": "http://kulturarvsdata.se/raa/lamning/adc490ba-871a-45bd-8e3d-0a27761b3b6c",
+            "ksam:itemDescription": [
+                {
+                    "@id": "_:ab9afc5a23b0281d24d65bb452eae40c"
+                },
+                {
+                    "@id": "_:088ec84a70aef42fb24558cda492cfe4"
+                },
+                {
+                    "@id": "_:3f4892f7fda0e5e701a4771b3dc06672"
+                },
+                {
+                    "@id": "_:b959314a5bbafad0e4b4398dea777139"
+                },
+                {
+                    "@id": "_:6bc18d9501a91b5da51c09770017b678"
+                },
+                {
+                    "@id": "_:f9898b548bba8b62b6ecf01e941dc8b8"
+                },
+                {
+                    "@id": "_:756f99a1f91207a7cd9b5ecbc173cf63"
+                },
+                {
+                    "@id": "_:fcee4e421ed1c9ae223a00312c1e367f"
+                }
+            ],
+            "ksam:subject": [
+                {
+                    "@id": "http://kulturarvsdata.se/resurser/Subject#archaeology"
+                },
+                {
+                    "@id": "http://kulturarvsdata.se/resurser/Subject#site"
+                }
+            ],
+            "ksam:buildDate": "2026-11-14",
+            "ksam:presentation": {
+                "@value": "<pres:item xmlns:pres=\"http://kulturarvsdata.se/presentation#\"><georss:where xmlns:georss=\"http://www.georss.org/georss\"><gml:Point xmlns:gml=\"http://www.opengis.net/gml\" srsName=\"EPSG:4326\"><gml:coordinates cs=\",\" decimal=\".\" ts=\" \">15.456428761252013,60.73368161435678</gml:coordinates></gml:Point></georss:where><pres:buildDate>2026-11-14</pres:buildDate><pres:context><pres:event>Belägen</pres:event><pres:placeLabel>Sverige, Dalarna, Falun, Dalarna, Bjursås</pres:placeLabel></pres:context><pres:dataQuality>http://kulturarvsdata.se/resurser/DataQuality#raw</pres:dataQuality><pres:description>Trefaldighetskälla, oval, 1.5x1 m (NNÖ-SSV) och 0.14 m dj. Stensatt, med 0.3-0.4 mst stenar. Utlopp mot Ö-NÖ. På 1930-talet besöktes källan av enstaka personer.Nämns av Karl-Erik Forsslund. Beskrivningen är inte kvalitetssäkrad. Information kan saknas, vara felaktig eller inaktuell. Se även Inventeringsbok.</pres:description><pres:entityUri>http://kulturarvsdata.se/raa/lamning/adc490ba-871a-45bd-8e3d-0a27761b3b6c</pres:entityUri><pres:id>adc490ba-871a-45bd-8e3d-0a27761b3b6c</pres:id><pres:idLabel>L2001:646</pres:idLabel><pres:itemLabel>Källa med tradition</pres:itemLabel><pres:organization>Riksantikvarieämbetet</pres:organization><pres:organizationShort>RAÄ</pres:organizationShort><pres:references></pres:references><pres:representations><pres:representation format=\"HTML\">http://kulturarvsdata.se/raa/lamning/HTML/adc490ba-871a-45bd-8e3d-0a27761b3b6c</pres:representation><pres:representation format=\"presentation\">http://kulturarvsdata.se/raa/lamning/XML/adc490ba-871a-45bd-8e3d-0a27761b3b6c</pres:representation><pres:representation format=\"RDF\">http://kulturarvsdata.se/raa/lamning/RDF/adc490ba-871a-45bd-8e3d-0a27761b3b6c</pres:representation></pres:representations><pres:service>kmr_lamningar</pres:service><pres:tag>Mas-källa</pres:tag><pres:type>Kulturlämning</pres:type><pres:version>1.11</pres:version></pres:item>",
+                "@type": "rdf:XMLLiteral"
+            },
+            "ksam:itemKeyword": {
+                "@language": "sv",
+                "@value": "Mas-källa"
+            },
+            "ksam:itemClassName": {
+                "@language": "sv",
+                "@value": "Källa med tradition"
+            },
+            "ksam:serviceOrganization": {
+                "@language": "sv",
+                "@value": "RAÄ"
+            },
+            "@type": "ksam:Entity",
+            "ksam:itemSpecification": [
+                {
+                    "@id": "_:b4422ec262cf233fab94acf717e0c0a2"
+                },
+                {
+                    "@id": "_:9c8810155a7f926de5ac667d86618c32"
+                }
+            ],
+            "dcterms:replaces": {
+                "@id": "http://kulturarvsdata.se/raa/fmi/10234200270001"
+            },
+            "ksam:itemName": {
+                "@id": "_:1860d7345a53de9e7a95be36b6d53d52"
+            },
+            "ksam:url": "https://app.raa.se/open/fornsok/lamning/adc490ba-871a-45bd-8e3d-0a27761b3b6c",
+            "ksam:mediaType": "text/plain",
+            "ksam:itemLicense": {
+                "@id": "http://kulturarvsdata.se/resurser/license#cc0"
+            },
+            "ksam:itemNumber": [
+                {
+                    "@id": "_:d8af51348dbc59c0ba46e2b0f63efc4b"
+                },
+                {
+                    "@id": "_:298d15dd0d30d26d196012bf93ec96b2"
+                }
+            ],
+            "ksam:ksamsokVersion": "1.11",
+            "ksam:lastChangedDate": "2018-10-01",
+            "ksam:itemLabel": {
+                "@language": "sv",
+                "@value": "Källa med tradition"
+            },
+            "ksam:itemLicenseUrl": {
+                "@id": "http://creativecommons.org/publicdomain/zero/1.0/"
+            },
+            "ksam:itemSuperType": {
+                "@id": "http://kulturarvsdata.se/resurser/EntitySuperType#object"
+            },
+            "ksam:dataQuality": {
+                "@id": "http://kulturarvsdata.se/resurser/DataQuality#raw"
+            },
+            "ksam:serviceOrganizationFull": "Riksantikvarieämbetet",
+            "ksam:itemType": {
+                "@id": "http://kulturarvsdata.se/resurser/EntityType#monument"
+            },
+            "ksam:serviceName": "kmr_lamningar",
+            "ksam:context": {
+                "@id": "_:19918e7d8243c0657951b074d2b93c76"
+            }
+        },
+        {
+            "@id": "_:6bc18d9501a91b5da51c09770017b678",
+            "ksam:desc": {
+                "@language": "sv",
+                "@value": "Fru Lax Greta Holm har använt källan som önskekälla."
+            },
+            "ksam:type": {
+                "@language": "sv",
+                "@value": "Tradition"
+            },
+            "@type": "ksam:ItemDescription"
+        }
+    ],
+    "@context": {
+        "pres": "http://kulturarvsdata.se/presentation#",
+        "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        "owl": "http://www.w3.org/2002/07/owl#",
+        "ksam": "http://kulturarvsdata.se/ksamsok#",
+        "gml": "http://www.opengis.net/gml",
+        "georss": "http://www.georss.org/georss",
+        "dcterms": "http://purl.org/dc/terms/",
+        "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+        "dc": "http://purl.org/dc/elements/1.1/"
+    }
+}

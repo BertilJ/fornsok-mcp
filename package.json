@@ -1,0 +1,29 @@
+{
+	"name": "fornsok-mcp",
+	"version": "0.1.0",
+	"private": true,
+	"scripts": {
+		"dev": "CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false WRANGLER_SEND_METRICS=false wrangler dev",
+		"start": "npm run dev",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"type-check": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+		"cf-typegen": "wrangler types",
+		"format": "oxfmt --write .",
+		"lint:fix": "oxlint --fix"
+	},
+	"dependencies": {
+		"@modelcontextprotocol/server": "2.4.0",
+		"agents": "0.33.0",
+		"zod": "^4.4.3"
+	},
+	"devDependencies": {
+		"@modelcontextprotocol/client": "2.4.0",
+		"@types/node": "^22.20.5",
+		"oxfmt": "^0.56.0",
+		"oxlint": "^1.71.0",
+		"typescript": "6.0.3",
+		"vitest": "^5.1.0",
+		"wrangler": "^4.105.0"
+	}
+}
