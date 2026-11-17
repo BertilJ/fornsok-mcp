@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createLiveDeps } from "../src/deps";
+import { createDeps, createLiveDeps } from "../src/deps";
 import type { ToolDeps } from "../src/tools/common";
 import type { FetchLike } from "../src/upstream/client";
 
@@ -172,13 +172,16 @@ export function fixtureDeps(routes: Route[] = standardRoutes()): { deps: ToolDep
 	return { deps: createLiveDeps({ fetch, retryDelayMs: 0 }), calls };
 }
 
-/** MCP-klient mot servern i processen (createMcpHandler), med inspelade svar. */
-export async function connectMcp(routes: Route[] = standardRoutes(), options: Parameters<typeof createLiveDeps>[0] = {}) {
+/**
+ * MCP-klient mot servern i processen (createMcpHandler), med inspelade svar.
+ * `options.db` kopplar in ett index (D1-yta), `options.semantic` en semantisk kanal.
+ */
+export async function connectMcp(routes: Route[] = standardRoutes(), options: Parameters<typeof createDeps>[0] = {}) {
 	const { Client, StreamableHTTPClientTransport } = await import("@modelcontextprotocol/client");
 	const { createMcpHandler } = await import("agents/mcp/server");
 	const { createServer } = await import("../src/server");
 	const { fetch, calls } = fakeFetch(routes);
-	const deps = createLiveDeps({ fetch, retryDelayMs: 0, ...options });
+	const deps = createDeps({ fetch, retryDelayMs: 0, ...options });
 	const handler = createMcpHandler(() => createServer(deps));
 	const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
 	const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {

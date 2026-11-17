@@ -2,7 +2,10 @@
 	"extends": "../tsconfig.json",
 	"compilerOptions": {
 		"types": ["node"],
-		"noEmit": true
+		"noEmit": true,
+		// ingest/ körs direkt av Node 22 (typstrippning) och importerar därför med
+		// filändelsen .ts; testerna importerar ingest-filerna på samma sätt.
+		"allowImportingTsExtensions": true
 	},
 	"include": ["../worker-configuration.d.ts", "../src/**/*.ts", "./**/*.ts", "../scripts/**/*.ts"]
 }

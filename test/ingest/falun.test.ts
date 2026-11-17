@@ -2,13 +2,14 @@
  * Inläsning av Falu kommun (SPEC 10: 3 908 lämningar ska ge 3 908 rader),
  * SQL-filerna mot den direkta laddningen, idempotens och avstämning.
  */
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { diff, hashesFromSqlite, hashesFromWranglerJson, hashQueries, load } from "../../ingest/load.ts";
-import { FileSink, MIGRATION } from "../../ingest/sink.ts";
-import { MAX_STATEMENT_BYTES } from "../../ingest/sql.ts";
+import { AvstamningError, diff, hashesFromSqlite, hashesFromWranglerJson, hashQueries, load } from "../../ingest/load.ts";
+import { DbSink, FileSink, MIGRATION } from "../../ingest/sink.ts";
+import { MAX_STATEMENT_BYTES, type SqlSink } from "../../ingest/sql.ts";
 import { FALUN_GPKG, HAS_FALUN, type LoadedFalun, loadFalun, SKIP_MESSAGE } from "../store/falun-fixture";
 
 type Row = Record<string, unknown>;
@@ -128,7 +129,7 @@ describe.skipIf(!HAS_FALUN)(`Falu kommun ${HAS_FALUN ? "" : `(${SKIP_MESSAGE})`}
 	});
 
 	it("FTS-index är konsistent med tabellen", () => {
-		expect(() => db.exec("INSERT INTO lamning_fts(lamning_fts) VALUES('integrity-check')")).not.toThrow();
+		expect(() => db.exec("INSERT INTO lamning_fts(lamning_fts, rank) VALUES('integrity-check', 1)")).not.toThrow();
 	});
 
 	it("SQL-filerna ryms i D1:s gränser och saknar transaktioner", () => {
@@ -153,7 +154,7 @@ describe.skipIf(!HAS_FALUN)(`Falu kommun ${HAS_FALUN ? "" : `(${SKIP_MESSAGE})`}
 		expect(once).toEqual(tableCounts(db));
 		const h = (d: DatabaseSync) => (d.prepare("SELECT group_concat(hash, '') AS h FROM (SELECT hash FROM lamning ORDER BY uuid)").get() as Row).h;
 		expect(h(fromFiles)).toBe(h(db));
-		expect(() => fromFiles.exec("INSERT INTO lamning_fts(lamning_fts) VALUES('integrity-check')")).not.toThrow();
+		expect(() => fromFiles.exec("INSERT INTO lamning_fts(lamning_fts, rank) VALUES('integrity-check', 1)")).not.toThrow();
 		fromFiles.close();
 	});
 
@@ -217,3 +218,76 @@ describe.skipIf(!HAS_FALUN)(`Falu kommun ${HAS_FALUN ? "" : `(${SKIP_MESSAGE})`}
 		expect(hashesFromWranglerJson(jsonFiles).size).toBe(3908);
 	});
 });
+
+// ---------------------------------------------------------------- avstämning mot källan (granskningen, punkt 8)
+
+describe.skipIf(!HAS_FALUN)("avstämning mot källan vid inläsning", () => {
+	/** En ändrad kopia av Falu-filen (gpkg-triggrarna tas bort i kopian; de kräver SpatiaLite-funktioner). */
+	function variant(edit: (db: DatabaseSync) => void): { path: string; cleanup: () => void } {
+		const dir = mkdtempSync(join(tmpdir(), "fornsok-variant-"));
+		const path = join(dir, "variant.gpkg");
+		copyFileSync(FALUN_GPKG, path);
+		const db = new DatabaseSync(path);
+		for (const t of db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all() as Row[]) db.exec(`DROP TRIGGER "${String(t.name)}"`);
+		edit(db);
+		db.close();
+		return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+	}
+
+	it("en lämning med ogiltigt uuid avbryter laddningen före synkraden", () => {
+		const v = variant((db) => db.exec("UPDATE lamning SET uuid = 'inte-ett-uuid' WHERE lamningsnummer = 'L2001:646'"));
+		try {
+			const sink = new MemorySink();
+			let err: unknown;
+			try {
+				load(v.path, sink);
+			} catch (e) {
+				err = e;
+			}
+			expect(err).toBeInstanceOf(AvstamningError);
+			expect(() => load(v.path, new MemorySink())).toThrow(/lämningar: källan har 3908, skrivna 3907/);
+			expect(sink.statements.some((s) => s.includes("INSERT INTO synk_status"))).toBe(false);
+		} finally {
+			v.cleanup();
+		}
+	});
+
+	it("uuid med versaler läses (med barnrader) och skrivs med gemener", () => {
+		const v = variant((db) => {
+			const u = "adc490ba-871a-45bd-8e3d-0a27761b3b6c";
+			db.exec(`UPDATE lamning SET uuid = upper(uuid) WHERE uuid = '${u}'`);
+			for (const t of ["point", "linestring", "polygon", "egenskap", "ingaendelamning", "lämningar_kommun_falun_lägesosäkerhet"])
+				db.exec(`UPDATE "${t}" SET lamning_uuid = upper(lamning_uuid) WHERE lamning_uuid = '${u}'`);
+		});
+		const dir = mkdtempSync(join(tmpdir(), "fornsok-upper-"));
+		try {
+			const r = load(v.path, new DbSink(join(dir, "x.sqlite"), { recreate: true }));
+			expect(r.stats.lamningar).toBe(3908);
+			const db = new DatabaseSync(join(dir, "x.sqlite"));
+			const row = db.prepare("SELECT uuid, osakerhet_m, geometrityp FROM lamning WHERE lamningsnummer = 'L2001:646'").get() as Row;
+			expect(row).toMatchObject({ uuid: "adc490ba-871a-45bd-8e3d-0a27761b3b6c", osakerhet_m: 15, geometrityp: "Point" });
+			expect((db.prepare("SELECT count(*) AS c FROM egenskap e JOIN lamning l ON l.id = e.lamning_id WHERE l.lamningsnummer = 'L2001:646'").get() as Row).c).toBe(1);
+			db.close();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+			v.cleanup();
+		}
+	});
+});
+
+class MemorySink implements SqlSink {
+	statements: string[] = [];
+	private seen = new Set<string>();
+	emit(s: string) {
+		this.statements.push(s);
+	}
+	beginBatch() {
+		this.seen.clear();
+	}
+	omradeSeen(key: string) {
+		const had = this.seen.has(key);
+		this.seen.add(key);
+		return had;
+	}
+	close() {}
+}

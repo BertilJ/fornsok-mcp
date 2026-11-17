@@ -99,6 +99,7 @@ function report(r: ReturnType<typeof load>) {
 	console.error(
 		`${s.lamningar} lämningar, ${s.geometrier} geometrier, ${s.egenskaper} egenskaper, ${s.ingaende} ingående; uttagsdatum ${r.uttagsdatum}; ${r.sekunder.toFixed(1)} s`,
 	);
+	if (s.kalla) console.error(`Avstämning mot källan: stämmer (${s.kalla.lamningar} lämningar i filen).`);
 	if (s.foraldralosa) console.error(`Föräldralösa barnrader: ${s.foraldralosa}`);
 	if (r.utanLandskap) console.error(`Lämningar utan landskap: ${r.utanLandskap}`);
 	for (const [k, v] of s.varningar) console.error(`Varning: ${k}: ${v}`);

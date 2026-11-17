@@ -3,11 +3,15 @@ import { z } from "zod";
 import { SOURCE_NAMES, ToolInputError, UpstreamError } from "../errors";
 import { type Geometry, simplifyToLimit, swerefToWgs, wgsToSweref, countPositions } from "../geo/geometry";
 import { type ParsedId, parseId } from "../ids";
-import type { LamningPost, RecordFetchResult, Version } from "../sources/types";
+import type { LamningPost, RecordFetchResult, Referenser, Version } from "../sources/types";
+import { IndexInputError } from "../store/d1";
 import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, fmtCoord, list, ok, runTool } from "./common";
 import { type DokumentPost, dokumentPost, formatDokumentRad, toDokumentPost } from "./dokument";
+import type { OpenIndex } from "./via_index";
 
 export const MAX_GEOMETRY_POSITIONS = 500;
+/** Högst så många lämningar per anrop (även när ett RAÄ-nummer delas av flera). */
+export const MAX_IDS = 10;
 
 const INKLUDERA = ["geometri", "referenser", "dokument", "historik", "relaterat"] as const;
 const SENARE: Record<string, string> = {
@@ -24,7 +28,7 @@ export const lamningInput = z.object({
 		.array(z.enum(INKLUDERA))
 		.optional()
 		.describe(
-			"Extra delar: geometri (GeoJSON i WGS 84, förenklad över 500 brytpunkter) och referenser (skriftliga källor, kartor, uppgiftslämnare). dokument, historik och relaterat kommer senare.",
+			"Extra delar: geometri (GeoJSON i WGS 84, förenklad över 500 brytpunkter), referenser (skriftliga källor, kartor, uppgiftslämnare), dokument (med dokument_ref till hamta_dokument) och historik (versioner). Referenser, dokument och historik hämtas från Fornsök-appen. relaterat kommer senare.",
 		),
 });
 
@@ -102,6 +106,8 @@ export const lamningOutput = z.object({
 	lamningar: z.array(lamningSchema),
 	ej_hittade: z.array(z.object({ id: z.string(), orsak: z.string() })),
 	anmarkningar: z.array(z.string()),
+	/** true när indexet inte kunde användas och alla poster kommer från levande källor (SPEC 8). */
+	reservlage: z.boolean(),
 });
 
 type LamningArgs = z.infer<typeof lamningInput>;
@@ -114,7 +120,7 @@ export function registerLamning(server: McpServer, deps: ToolDeps): void {
 			description:
 				"Hela posten för 1–10 lämningar ur Kulturmiljöregistret: identiteter, typ, antikvarisk bedömning med motivering, beskrivning, " +
 				"tradition, terräng, orientering, egenskaper, ingående lämningar, statusar, indelning, mittpunkt och lägesosäkerhet. " +
-				"Tar lämningsnummer, RAÄ-nummer (äldre litteratur), UUID eller K-samsök-URI. Hämtas från Fornsök-appen, med K-samsök som reserv. " +
+				"Tar lämningsnummer, RAÄ-nummer (äldre litteratur; ett nummer som delas av flera lämningar ger alla), UUID eller K-samsök-URI. Grundposten kommer ur serverns eget index; saknas den där, eller är indexet otillgängligt, hämtas den från Fornsök-appen med K-samsök som reserv. " +
 				"`inkludera` lägger till geometri, referenser, dokument (med dokument_ref till hamta_dokument) och versionshistorik.",
 			inputSchema: lamningInput,
 			outputSchema: lamningOutput,
@@ -140,23 +146,54 @@ export async function hamtaLamningar(args: LamningArgs, deps: ToolDeps) {
 		}
 	}
 
-	// Nummer → UUID med ett anrop.
-	const numbers = parsed.filter((p) => p.kind !== "uuid").map((p) => (p as { value: string }).value);
-	let resolved = new Map<string, string>();
-	if (numbers.length) resolved = await deps.ids.resolveNumbers([...new Set(numbers)]);
+	// Indexet först (SPEC 6: grundposten ur D1); levande källor för det som saknas där, och som reserv.
+	let ix: OpenIndex | null = null;
+	let reservOrsak: string | null = null;
+	if (deps.index) {
+		const o = await deps.index.open();
+		if (o.ok) ix = o;
+		else reservOrsak = o.orsak;
+	} else reservOrsak = "indexet är inte inkopplat";
+	const indexFel = (err: unknown) => {
+		if (err instanceof IndexInputError) throw new ToolInputError(err.message);
+		deps.index?.reportFailure(err);
+		ix = null;
+		reservOrsak = "indexanropet misslyckades";
+	};
+
+	// Nummer → UUID. Ett RAÄ-nummer kan delas av flera lämningar.
+	const numbers = [...new Set(parsed.filter((p) => p.kind !== "uuid").map((p) => (p as { value: string }).value))];
+	const resolved = new Map<string, string[]>();
+	if (numbers.length && ix) {
+		try {
+			for (const [k, v] of await (ix as OpenIndex).store.resolveIdsAll(numbers)) resolved.set(k, v);
+		} catch (err) {
+			indexFel(err);
+		}
+	}
+	const viaLive = numbers.filter((n) => !resolved.has(n));
+	if (viaLive.length) for (const [k, v] of await deps.ids.resolveNumbers(viaLive)) resolved.set(k, [v]);
 
 	const wanted: Array<{ id: string; uuid: string }> = [];
 	for (const p of parsed) {
-		if (p.kind === "uuid") wanted.push({ id: p.input, uuid: p.uuid });
-		else {
-			const uuid = resolved.get(p.value);
-			if (uuid) wanted.push({ id: p.input, uuid });
-			else
-				ej_hittade.push({
-					id: p.input,
-					orsak: `Inget ${p.kind === "lamningsnummer" ? "lämningsnummer" : "RAÄ-nummer"} "${p.value}" hittades i K-samsök (som ligger några dagar efter registret).`,
-				});
+		if (p.kind === "uuid") {
+			wanted.push({ id: p.input, uuid: p.uuid });
+			continue;
 		}
+		const uuids = resolved.get(p.value) ?? [];
+		if (!uuids.length) {
+			ej_hittade.push({
+				id: p.input,
+				orsak: `Inget ${p.kind === "lamningsnummer" ? "lämningsnummer" : "RAÄ-nummer"} "${p.value}" hittades ${ix ? "i indexet eller i K-samsök" : "i K-samsök (som ligger några dagar efter registret)"}.`,
+			});
+			continue;
+		}
+		if (uuids.length > 1) {
+			anmarkningar.push(
+				`RAÄ-numret "${p.value}" är flertydigt: det delas av ${uuids.length} lämningar. ${uuids.length > MAX_IDS ? `De ${MAX_IDS} första visas.` : "Alla visas."} Ange lämningsnummer för att välja en.`,
+			);
+		}
+		for (const uuid of uuids) wanted.push({ id: p.input, uuid });
 	}
 	const firstIdFor = new Map<string, string>();
 	const unique: Array<{ id: string; uuid: string }> = [];
@@ -165,26 +202,57 @@ export async function hamtaLamningar(args: LamningArgs, deps: ToolDeps) {
 		if (first === undefined) {
 			firstIdFor.set(w.uuid, w.id);
 			unique.push(w);
-		} else {
+		} else if (first !== w.id) {
 			anmarkningar.push(`"${w.id}" och "${first}" avser samma lämning; den visas en gång.`);
 		}
 	}
+	if (unique.length > MAX_IDS) {
+		anmarkningar.push(`Högst ${MAX_IDS} lämningar per anrop; ${unique.length - MAX_IDS} till ströks (${unique.slice(MAX_IDS).map((u) => u.id).join(", ")}).`);
+		unique.length = MAX_IDS;
+	}
+
+	// Grundposter ur indexet i ett anrop.
+	let fromIndex = new Map<string, RecordFetchResult>();
+	if (ix && unique.length) {
+		try {
+			fromIndex = await (ix as OpenIndex).store.getByUuids(unique.map((u) => u.uuid));
+		} catch (err) {
+			indexFel(err);
+		}
+	}
+	const openIx = ix as OpenIndex | null;
+	if (!openIx) anmarkningar.push(`Reservläge: ${reservOrsak}. Posterna hämtades från RAÄ:s levande källor.`);
 
 	const results = await Promise.all(
 		unique.map(async (w) => {
+			const hit = fromIndex.get(w.uuid);
+			if (hit && openIx) {
+				hit.post.hamtad_fran = openIx.hamtad_fran;
+				const extra = await fetchExtras(w.uuid, inkludera, deps, true);
+				return { r: { result: hit, notes: [] as string[] }, extra, index: true };
+			}
 			const r = await fetchWithFallback(w.uuid, deps);
-			const extra = r.result ? await fetchExtras(w.uuid, inkludera, deps) : null;
-			return { r, extra };
+			if (r.result) {
+				if (openIx) r.notes.push(`${r.result.post.lamningsnummer ?? w.uuid}: finns inte i indexet; hämtad från levande källa.`);
+				else r.result.post.hamtad_fran = `${r.result.post.hamtad_fran} – reservläge`;
+			}
+			const extra = r.result ? await fetchExtras(w.uuid, inkludera, deps, false) : null;
+			return { r, extra, index: false };
 		}),
 	);
 	const lamningar: LamningPost[] = [];
-	results.forEach(({ r, extra }, i) => {
+	results.forEach(({ r, extra, index }, i) => {
 		if (r.notes.length) anmarkningar.push(...r.notes);
 		if (!r.result) {
 			ej_hittade.push({ id: unique[i].id, orsak: r.error ?? "Lämningen hittades inte." });
 			return;
 		}
 		const post = withIncludes(r.result, inkludera);
+		// Indexposter har inga referenser; utan lyckad hämtning ska delen saknas, inte se tom ut.
+		if (index) {
+			if (extra?.referenser) post.referenser = extra.referenser;
+			else delete post.referenser;
+		}
 		if (extra?.dokument) post.dokument = extra.dokument;
 		if (extra?.historik) post.historik = extra.historik;
 		for (const n of extra?.notes ?? []) anmarkningar.push(`${post.lamningsnummer ?? post.uuid}: ${n}`);
@@ -195,7 +263,7 @@ export async function hamtaLamningar(args: LamningArgs, deps: ToolDeps) {
 		throw new ToolInputError(ej_hittade.map((e) => e.orsak).join(" "));
 	}
 
-	const structured = { lamningar, ej_hittade, anmarkningar };
+	const structured = { lamningar, ej_hittade, anmarkningar, reservlage: !openIx };
 	const lines: string[] = [];
 	for (const l of lamningar) lines.push(formatPost(l));
 	for (const e of ej_hittade) lines.push(`Ej hittad: ${e.id} – ${e.orsak}`);
@@ -242,11 +310,19 @@ async function fetchExtras(
 	uuid: string,
 	inkludera: Set<string>,
 	deps: ToolDeps,
-): Promise<{ dokument?: DokumentPost[]; historik?: Version[]; notes: string[] }> {
+	referenserLive: boolean,
+): Promise<{ referenser?: Referenser; dokument?: DokumentPost[]; historik?: Version[]; notes: string[] }> {
 	const notes: string[] = [];
-	const out: { dokument?: DokumentPost[]; historik?: Version[]; notes: string[] } = { notes };
+	const out: { referenser?: Referenser; dokument?: DokumentPost[]; historik?: Version[]; notes: string[] } = { notes };
 	const why = (err: unknown) => (err instanceof UpstreamError ? err.message : "oväntat fel");
 	await Promise.all([
+		// Referenser finns inte i indexet (GeoPackage-filen saknar dem): hämtas från de levande postkällorna.
+		referenserLive && inkludera.has("referenser")
+			? fetchWithFallback(uuid, deps).then((r) => {
+					if (r.result) out.referenser = r.result.referenser;
+					else notes.push(`referenser kunde inte hämtas (${r.error ?? "okänt fel"}).`);
+				})
+			: null,
 		inkludera.has("dokument")
 			? deps.documents
 					.listDokument(uuid)
@@ -283,7 +359,8 @@ function withIncludes(r: RecordFetchResult, inkludera: Set<string>): LamningPost
 			const s = simplifyToLimit(planar, MAX_GEOMETRY_POSITIONS);
 			planar = s.geometry;
 			post.geometri = swerefToWgs(planar);
-			post.geometri_forenklad = s.tolerance > 0 && countPositions(planar) < before;
+			// Indexets geometri kan redan vara förenklad vid inläsningen (geometri_forenklad i posten).
+			post.geometri_forenklad = !!r.post.geometri_forenklad || (s.tolerance > 0 && countPositions(planar) < before);
 		} else {
 			post.geometri = null;
 		}

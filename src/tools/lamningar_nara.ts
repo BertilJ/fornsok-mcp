@@ -5,7 +5,9 @@ import { ToolInputError } from "../errors";
 import { bboxAround, compassDirection, type Geometry, nearestPoint, wgsToSweref } from "../geo/geometry";
 import { isInSweden, type Planar, round, toLatLon, toPlanar } from "../geo/sweref";
 import { BEDOMNINGAR, type NearbyFeature, type NearbyPage } from "../sources/types";
+import { reservHamtadFran } from "../store/access";
 import { READ_ONLY, type ToolDeps, ok, runTool } from "./common";
+import { type OpenIndex, viaIndex } from "./via_index";
 
 /** Högst så många geometrier hämtas per anrop till OGC API. */
 export const NEARBY_FETCH_LIMIT = 1000;
@@ -34,6 +36,10 @@ export const naraOutput = z.object({
 	totalt: z.number().int(),
 	geometrier_i_omradet: z.number().int().nullable(),
 	kalla: z.string(),
+	/** Varifrån svaret kom och hur färskt det är (SPEC 7). */
+	hamtad_fran: z.string(),
+	/** true när indexet inte kunde användas och svaret kommer från OGC API (SPEC 8). */
+	reservlage: z.boolean(),
 	lamningar: z.array(
 		z.object({
 			lamningsnummer: z.string(),
@@ -49,6 +55,7 @@ export const naraOutput = z.object({
 			inom_lamningen: z.boolean(),
 			geometrier: z.number().int(),
 			geometrityper: z.array(z.string()),
+			osakerhet_m: z.number().nullable().optional(),
 			narmaste_punkt: z.object({ lat: z.number(), lon: z.number() }),
 			narmaste_punkt_sweref99tm: z.object({ e: z.number(), n: z.number() }),
 			url: z.string().nullable(),
@@ -110,7 +117,7 @@ export function registerLamningarNara(server: McpServer, deps: ToolDeps): void {
 		{
 			title: "Lämningar nära en plats",
 			description:
-				"Lämningar närmast en punkt (lat/lon i WGS 84) inom en radie, eller inom en ruta, via RAÄ:s OGC API Features. " +
+				"Lämningar närmast en punkt (lat/lon i WGS 84) inom en radie, eller inom en ruta. Räknas mot serverns eget index; om det inte är tillgängligt mot RAÄ:s OGC API Features (svaret märks som reservläge). " +
 				"Avståndet räknas i SWEREF 99 TM till närmaste punkt på lämningens geometri (punkt, linje eller yta; 0 m = punkten ligger inom ytan). " +
 				"Sorterat närmast först, med väderstreck från punkten. Filter på lämningstyp och antikvarisk bedömning. " +
 				"En koordinat från t.ex. ortnamnsuppslag (TORA i Riksarkivets koppling) kan skickas direkt hit.",
@@ -153,6 +160,77 @@ export async function lamningarNara(args: NaraArgs, deps: ToolDeps) {
 	}
 
 	const lamningstyp = args.lamningstyp?.length ? await deps.domains.resolveLamningstyper(args.lamningstyp) : undefined;
+	const q: NaraQuery = { args, center, bbox, lamningstyp };
+	return viaIndex(
+		deps,
+		(ix) => naraIndex(q, ix),
+		(orsak) => naraReserv(q, deps, orsak),
+	);
+}
+
+interface NaraQuery {
+	args: NaraArgs;
+	center: { lat: number; lon: number };
+	bbox: [number, number, number, number] | null;
+	lamningstyp: string[] | undefined;
+}
+
+type NaraItem = z.infer<typeof naraOutput>["lamningar"][number];
+
+/** Exakt avstånd mot indexets geometrier (SPEC 6): ett anrop, inget tak på geometrier per svar. */
+async function naraIndex(q: NaraQuery, ix: OpenIndex) {
+	const { args, center, bbox, lamningstyp } = q;
+	const centerPlanar = toPlanar(center);
+	const page = await ix.store.nearby({
+		...(bbox ? { bbox } : { lat: center.lat, lon: center.lon, radie_m: args.radie_m }),
+		lamningstyp,
+		antikvarisk_bedomning: args.antikvarisk_bedomning,
+		antal: args.antal,
+	});
+	const anmarkningar: string[] = [];
+	if (page.totalt_ungefar) {
+		anmarkningar.push(
+			`Mycket tätt område: fler kandidater än som kunde prövas. De närmaste lämningarna är med, och svaret är fullständigt inom ${page.fullstandig_inom_m ?? "?"} m; totalt avser bara den radien. Minska radien eller rutan för ett fullständigt svar.`,
+		);
+	}
+	const items: NaraItem[] = page.traffar.map((h) => {
+		const ll = toLatLon(h.narmaste_punkt_sweref);
+		return {
+			lamningsnummer: h.lamningsnummer ?? h.uuid,
+			raa_nummer: h.raa_nummer,
+			uuid: h.uuid,
+			lamningstyp: h.lamningstyp,
+			antikvarisk_bedomning: h.antikvarisk_bedomning,
+			namn: h.lamningsnamn,
+			kommun: h.kommun.length ? h.kommun.join(", ") : null,
+			lan: h.lan.length ? h.lan.join(", ") : null,
+			avstand_m: h.avstand_m,
+			vaderstreck: h.avstand_m < 0.5 ? null : compassDirection(centerPlanar, h.narmaste_punkt_sweref),
+			inom_lamningen: h.avstand_m < 0.5 && isAreal(h.narmaste_typ),
+			geometrier: h.geometrier,
+			geometrityper: h.geometrityper,
+			osakerhet_m: h.osakerhet_m,
+			narmaste_punkt: { lat: round(ll.lat, 7), lon: round(ll.lon, 7) },
+			narmaste_punkt_sweref99tm: { e: round(h.narmaste_punkt_sweref.e, 1), n: round(h.narmaste_punkt_sweref.n, 1) },
+			url: h.url,
+		};
+	});
+	return respondNara(q, {
+		sokt_radie_m: bbox ? null : page.fullstandig_inom_m !== undefined ? Math.min(args.radie_m, page.fullstandig_inom_m) : args.radie_m,
+		fullstandig: !page.totalt_ungefar,
+		totalt: page.totalt,
+		geometrier_i_omradet: null,
+		kalla: "Lämningsindex (D1)",
+		hamtad_fran: ix.hamtad_fran,
+		reservlage: false,
+		items,
+		anmarkningar,
+	});
+}
+
+/** Reserv: OGC API Features (samma beräkning som före indexet). */
+async function naraReserv(qn: NaraQuery, deps: ToolDeps, orsak: string) {
+	const { args, center, bbox, lamningstyp } = qn;
 	const anmarkningar: string[] = [];
 	const centerPlanar = toPlanar(center);
 
@@ -192,7 +270,8 @@ export async function lamningarNara(args: NaraArgs, deps: ToolDeps) {
 		anmarkningar.push("Området innehåller fler geometrier än som kunde hämtas; närmare lämningar kan saknas. Minska radien eller rutan.");
 	}
 
-	const items = shown.map((l) => {
+	anmarkningar.push(`Reservläge: ${orsak}. Avstånden räknades mot RAÄ:s OGC API Features.`);
+	const items: NaraItem[] = shown.map((l) => {
 		const f = l.feature;
 		const ll = toLatLon(l.point);
 		// "Inom" har bara mening för ytor; en punkt eller linje man står på är 0 m bort, inte "inom".
@@ -217,27 +296,58 @@ export async function lamningarNara(args: NaraArgs, deps: ToolDeps) {
 		};
 	});
 
-	const structured = {
-		mittpunkt: { lat: round(center.lat, 7), lon: round(center.lon, 7) },
-		radie_m: bbox ? null : args.radie_m,
-		bbox,
+	return respondNara(qn, {
 		sokt_radie_m: radius,
 		fullstandig: complete,
 		totalt,
 		geometrier_i_omradet: firstMatched,
 		kalla: "RAÄ:s OGC API Features (levande källa)",
+		hamtad_fran: reservHamtadFran("RAÄ:s OGC API Features", orsak),
+		reservlage: true,
+		items,
+		anmarkningar,
+	});
+}
+
+interface NaraSvar {
+	sokt_radie_m: number | null;
+	fullstandig: boolean;
+	totalt: number;
+	geometrier_i_omradet: number | null;
+	kalla: string;
+	hamtad_fran: string;
+	reservlage: boolean;
+	items: NaraItem[];
+	anmarkningar: string[];
+}
+
+function respondNara(q: NaraQuery, s: NaraSvar) {
+	const { args, center, bbox, lamningstyp } = q;
+	const { items, anmarkningar, totalt } = s;
+	const structured = {
+		mittpunkt: { lat: round(center.lat, 7), lon: round(center.lon, 7) },
+		radie_m: bbox ? null : args.radie_m,
+		bbox,
+		sokt_radie_m: s.sokt_radie_m,
+		fullstandig: s.fullstandig,
+		totalt,
+		geometrier_i_omradet: s.geometrier_i_omradet,
+		kalla: s.kalla,
+		hamtad_fran: s.hamtad_fran,
+		reservlage: s.reservlage,
 		lamningar: items,
 		anmarkningar,
 	};
 
 	const lines: string[] = [];
-	const omrade = bbox ? "i rutan" : `inom ${radius} m`;
+	const omrade = bbox ? "i rutan" : `inom ${s.sokt_radie_m} m`;
 	if (totalt === 0) {
 		lines.push(`Inga lämningar ${omrade} från ${center.lat.toFixed(5)}, ${center.lon.toFixed(5)}${filterText(args, lamningstyp)}.`);
 		lines.push("Pröva större radie eller färre filter.");
+		lines.push(`Källa: ${s.kalla}; ${s.hamtad_fran}.`);
 	} else {
 		lines.push(
-			`${totalt} lämningar ${omrade} från ${center.lat.toFixed(5)}, ${center.lon.toFixed(5)}${filterText(args, lamningstyp)}; visar ${items.length}, närmast först. Källa: RAÄ:s OGC API Features.`,
+			`${totalt} lämningar ${omrade} från ${center.lat.toFixed(5)}, ${center.lon.toFixed(5)}${filterText(args, lamningstyp)}; visar ${items.length}, närmast först. Källa: ${s.kalla}; ${s.hamtad_fran}.`,
 		);
 		items.forEach((it, i) => {
 			const lage = it.inom_lamningen
@@ -247,8 +357,9 @@ export async function lamningarNara(args: NaraArgs, deps: ToolDeps) {
 					: `${it.avstand_m} m ${it.vaderstreck}`;
 			const nr = [it.lamningsnummer, it.raa_nummer ? `(${it.raa_nummer})` : null].filter(Boolean).join(" ");
 			const namn = it.namn ? ` "${it.namn}"` : "";
+			const osak = it.osakerhet_m ? `, lägesosäkerhet ${it.osakerhet_m} m` : "";
 			lines.push(
-				`${i + 1}. ${nr}${namn} – ${it.lamningstyp ?? "okänd typ"}, ${it.antikvarisk_bedomning ?? "bedömning saknas"}. ${lage}. ${it.url ?? ""}`.trim(),
+				`${i + 1}. ${nr}${namn} – ${it.lamningstyp ?? "okänd typ"}, ${it.antikvarisk_bedomning ?? "bedömning saknas"}. ${lage}${osak}. ${it.url ?? ""}`.trim(),
 			);
 		});
 	}

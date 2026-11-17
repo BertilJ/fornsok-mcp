@@ -1,15 +1,30 @@
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/server";
 import { DisallowedCallError, SOURCE_NAMES, ToolInputError, UpstreamError } from "../errors";
 import type { DomainService } from "../lookup/domains";
-import type { DocumentSource, HistorySource, IdResolver, NearbySource, RecordSource, SearchSource } from "../sources/types";
+import type { DocumentSource, HistorySource, IdResolver, NearbySource, RecordSource, SearchSource, SemanticSearch } from "../sources/types";
+import type { IndexAccess } from "../store/access";
+import type { HittaPlatsDeps } from "./hitta_plats";
 
-/** Beroenden som verktygen får. Byts mot indexkällor i senare etapper. */
+/**
+ * Beroenden som verktygen får. `index` används först när det finns och är
+ * laddat; `search`, `ids`, `records` och `nearby` är de levande källorna, som
+ * också är reserv när indexet saknas eller fallerar (SPEC 8).
+ */
 export interface ToolDeps {
+	/** Ordsök via K-samsök (reserv för sok_lamningar). */
 	search: SearchSource;
+	/** Nummer → UUID via K-samsök (reserv, och för nummer som saknas i indexet). */
 	ids: IdResolver;
-	/** Postkällor i prioritetsordning: första som svarar vinner, nästa är reserv. */
+	/** Levande postkällor i prioritetsordning: första som svarar vinner, nästa är reserv. */
 	records: Array<{ name: string; source: RecordSource }>;
+	/** Närhetssök via OGC API Features (reserv för lamningar_nara). */
 	nearby: NearbySource;
+	/** Indexet i D1, om bindningen `DB` finns. */
+	index?: IndexAccess;
+	/** Den semantiska kanalen (SPEC 5.2), om AI och VECTORIZE finns. */
+	semantic?: SemanticSearch;
+	/** hitta_plats: indexets namn och Nominatim. */
+	plats?: HittaPlatsDeps;
 	domains: DomainService;
 	/** Dokumentlistor och filer (Fornsök-appen). */
 	documents: DocumentSource;

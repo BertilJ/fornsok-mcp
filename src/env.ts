@@ -22,10 +22,15 @@ export interface WorkerEnv {
 	RATE_LIMITER?: RateLimit;
 	/** KV för värdelistor och dokumentlistor. */
 	CACHE?: KVNamespace;
-	/** Kommande etapper (indexet). Används inte än. */
+	/** Indexet (D1). Saknas det används de levande källorna (reservläge) och nattsynken körs inte. */
 	DB?: D1Database;
+	/** Semantisk sökning (SPEC 5.2): vektorer och inbäddningsmodell. Saknas någon används bara ordsök. */
 	VECTORIZE?: Vectorize;
 	AI?: Ai;
+	/** Län i det semantiska omfånget, kommaseparerat (standard "Dalarna"). */
+	SEMANTIC_LAN?: string;
+	/** "av" stänger av Nominatim i hitta_plats (då bara indexets namn). */
+	NOMINATIM?: string;
 }
 
 /** Access-inställningar ur env. Utvecklingsläget kräver exakt strängen "true". */

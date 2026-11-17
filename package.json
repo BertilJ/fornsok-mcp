@@ -7,7 +7,9 @@
 		"start": "npm run dev",
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"type-check": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+		"type-check": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json && npm run type-check:ingest",
+		"type-check:ingest": "tsc --noEmit -p ingest/tsconfig.json",
+		"ingest": "node ingest/cli.ts",
 		"cf-typegen": "wrangler types",
 		"format": "oxfmt --write .",
 		"lint:fix": "oxlint --fix"

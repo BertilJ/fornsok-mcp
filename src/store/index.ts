@@ -25,6 +25,7 @@ import type {
 } from "../sources/types";
 import { type D1Like, type D1LikeStatement, IndexError, IndexInputError } from "./d1";
 import { buildFilter, type IndexSearchFilter, normLamningsnummer, normRaa, where } from "./filter";
+import type { FtsQuery } from "./fts";
 import { boxAround, checkedPlanar, spatialCondition, type SqlPart, type SwerefBox, wgsBoxToSweref } from "./spatial";
 
 export type { IndexSearchFilter } from "./filter";
@@ -60,6 +61,8 @@ export interface IndexHit extends SearchHit {
 
 export interface IndexSearchPage extends SearchPage {
 	traffar: IndexHit[];
+	/** Så många träffar går att bläddra till (högst MAX_OFFSET); sidor bortom ger tom lista. */
+	nabara: number;
 	/** Sökorden som användes (efter uppdelning), med * för prefix. */
 	sokord: string[];
 	/** true om `totalt` är en undre gräns (fler kandidater än MAX_KANDIDATER med `nara`). */
@@ -79,12 +82,53 @@ export interface NearbyIndexQuery {
 	antal?: number;
 }
 
+export interface NearbyIndexHit extends IndexHit {
+	avstand_m: number;
+	vaderstreck: string | null;
+	/** Närmaste punkt på geometrin, i SWEREF 99 TM (meter). */
+	narmaste_punkt_sweref: Planar;
+	/** Geometritypen för den del av geometrin som ligger närmast (i en GeometryCollection: delens typ). */
+	narmaste_typ: string;
+	/** Antal delgeometrier (1 utom för GeometryCollection). */
+	geometrier: number;
+	/** Delgeometriernas typer. */
+	geometrityper: string[];
+}
+
 export interface NearbyIndexPage {
 	/** Antal lämningar inom radien (eller rutan). */
 	totalt: number;
-	traffar: Array<IndexHit & { avstand_m: number; vaderstreck: string | null }>;
+	traffar: NearbyIndexHit[];
 	kalla: string;
 	byggdatum: string | null;
+	totalt_ungefar?: boolean;
+	/** I mycket täta områden: radien inom vilken svaret garanterat är fullständigt. */
+	fullstandig_inom_m?: number;
+}
+
+/** Indexets läge ur synk_status (SPEC 5.2, 7): finns data, och hur färskt är det. */
+export interface IndexStatus {
+	/** true om minst en lämning finns. */
+	laddad: boolean;
+	/** GeoPackage-filens uttagsdatum vid senaste grundladdning/avstämning (ÅÅÅÅ-MM-DD). */
+	uttagsdatum: string | null;
+	/** Senaste lyckade nattsynk (nyckeln `senast_synkat`, ISO-tid eller datum), om nattsynken skrivit den. */
+	senast_synkat: string | null;
+	senaste_grundladdning: string | null;
+	senaste_avstamning: string | null;
+}
+
+/** En rangordnad träff ur searchRanked: bara UUID (och avstånd med `nara`). */
+export interface RankedId {
+	uuid: string;
+	avstand_m?: number;
+	vaderstreck?: string | null;
+}
+
+export interface RankedPage {
+	totalt: number;
+	ids: RankedId[];
+	sokord: string[];
 	totalt_ungefar?: boolean;
 }
 
@@ -105,6 +149,8 @@ export interface StatistikResult {
 	avkortad: boolean;
 	kalla: string;
 	byggdatum: string | null;
+	/** true om `nara` gav fler kandidater än MAX_KANDIDATER (räkningen är då en undre gräns). */
+	totalt_ungefar?: boolean;
 }
 
 // ---------------------------------------------------------------- hjälp
@@ -121,6 +167,33 @@ function clampInt(x: unknown, def: number, min: number, max: number): number {
 	const n = typeof x === "number" && Number.isFinite(x) ? Math.trunc(x) : def;
 	return Math.min(max, Math.max(min, n));
 }
+
+/**
+ * Jämför lämningsnummer numeriskt ("L2000:999" före "L2000:1000"). null sist.
+ */
+export function compareLamningsnummer(a: string | null, b: string | null): number {
+	if (a === b) return 0;
+	if (a === null) return 1;
+	if (b === null) return -1;
+	const pa = /^L(\d{4}):(\d+)$/.exec(a);
+	const pb = /^L(\d{4}):(\d+)$/.exec(b);
+	if (!pa || !pb) return a.localeCompare(b);
+	return Number(pa[1]) - Number(pb[1]) || Number(pa[2]) - Number(pb[2]);
+}
+
+const RANK = "bm25(lamning_fts, 4.0, 4.0, 1.0, 2.0, 0.5)";
+const SNIPPETS = [2, 3, 4].map((c, i) => `, snippet(lamning_fts, ${c}, '«', '»', ' … ', 32) AS ${["s_besk", "s_trad", "s_terr"][i]}`).join("");
+/** Geometrier läses i omgångar om så många id. */
+const GEOMETRI_OMGANG = 1000;
+const AREA_DIMS = new Set<string>(["lan", "kommun", "socken", "landskap"]);
+
+/** Gruppnamn för en områdesnivå; socken med län när namnet finns i flera län. */
+function areaLabel(alias: string, d: string): string {
+	return d === "socken" ? `${alias}.namn || CASE WHEN ${alias}.lan <> '' THEN ' (' || ${alias}.lan || ')' ELSE '' END` : `${alias}.namn`;
+}
+
+/** SQL-ordning för lämningsnummer: år, sedan löpnummer som tal (formatet är L####:n). */
+const ORDER_LAMNINGSNUMMER = "substr(l.lamningsnummer, 1, 6), length(l.lamningsnummer), l.lamningsnummer, l.id";
 
 /** Kort början av en text, avkortad vid ordgräns. */
 export function lead(text: string | null, max = UTDRAG_TECKEN): string | null {
@@ -176,9 +249,12 @@ function emptyAreas(): Areas {
 export class IndexStore implements SearchSource, IdResolver, RecordSource, NearbySource {
 	private readonly db: D1Like;
 	private byggdatumCache: { value: string | null; at: number } | null = null;
+	/** Högst så många kandidater prövas med exakt avstånd (inställbart för test). */
+	private readonly maxKandidater: number;
 
-	constructor(db: D1Like) {
+	constructor(db: D1Like, options: { maxKandidater?: number } = {}) {
 		this.db = db;
+		this.maxKandidater = Math.max(1, Math.trunc(options.maxKandidater ?? MAX_KANDIDATER));
 	}
 
 	private stmt(part: SqlPart | string, extra: unknown[] = []): D1LikeStatement {
@@ -213,6 +289,25 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 		const value = str(rows[0]?.varde);
 		this.byggdatumCache = { value, at: Date.now() };
 		return value;
+	}
+
+	/**
+	 * Indexets läge: finns lämningar (billig kontroll, läser en rad) och
+	 * nycklarna i synk_status. Kastar IndexError om D1 inte svarar.
+	 */
+	async status(): Promise<IndexStatus> {
+		const [ex, st] = await this.batch([
+			this.stmt("SELECT EXISTS (SELECT 1 FROM lamning) AS laddad"),
+			this.stmt("SELECT nyckel, varde FROM synk_status"),
+		]);
+		const kv = new Map(st.map((r) => [String(r.nyckel), str(r.varde)]));
+		return {
+			laddad: Number(ex[0]?.laddad) === 1,
+			uttagsdatum: kv.get("uttagsdatum") ?? null,
+			senast_synkat: kv.get("senast_synkat") ?? null,
+			senaste_grundladdning: kv.get("senaste_grundladdning") ?? null,
+			senaste_avstamning: kv.get("senaste_avstamning") ?? null,
+		};
 	}
 
 	/** Antal lämningar i indexet (för hälsokontroll: 0 betyder att indexet inte är laddat). */
@@ -273,86 +368,126 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 	}
 
 	/**
+	 * Kandidater nära `p`: lämningar som uppfyller villkoren och vars ruta skär
+	 * sökrutan, ordnade efter rutans avstånd till punkten (som aldrig är större
+	 * än det exakta avståndet), högst MAX_KANDIDATER. Sedan exakt avstånd till
+	 * geometrin.
+	 *
+	 * Fanns fler kandidater sätts `cutoff` till rutavståndet för den första som
+	 * inte hämtades: alla lämningar med exakt avstånd ≤ cutoff är då med, men
+	 * bortom cutoff kan några saknas. Därför stryks träffar bortom cutoff, och
+	 * svaret är fullständigt inom min(radie, cutoff).
+	 *
+	 * Med sökord är lämning yttre loop (MATCH prövas per kandidat), så att ett
+	 * vanligt ord inte läser hela sin träfflista (granskningen, punkt 5).
+	 */
+	private async nearCandidates(
+		conditions: SqlPart[],
+		fts: FtsQuery | null,
+		p: Planar,
+		radius: number | null,
+	): Promise<{ hits: Array<{ id: number; uuid: string; m: Measured; rank: number | null }>; cutoff: number | null }> {
+		const from = fts ? "FROM lamning l CROSS JOIN lamning_fts f ON f.rowid = l.id" : "FROM lamning l";
+		const w = where(conditions, fts ? [{ sql: "f.lamning_fts MATCH ?", params: [fts.match] }] : []);
+		const rows = await this.all(
+			{
+				sql: `SELECT l.id, max(l.min_e - ?, 0, ? - l.max_e) AS dx, max(l.min_n - ?, 0, ? - l.max_n) AS dy${fts ? `, ${RANK} AS rk` : ""} ${from} ${w.sql} ORDER BY dx * dx + dy * dy, l.id LIMIT ?`,
+				params: [p.e, p.e, p.n, p.n, ...w.params],
+			},
+			[this.maxKandidater + 1],
+		);
+		let cutoff: number | null = null;
+		if (rows.length > this.maxKandidater) {
+			const r = rows[this.maxKandidater];
+			cutoff = Math.hypot(Number(r.dx) || 0, Number(r.dy) || 0);
+			rows.length = this.maxKandidater;
+		}
+		const rank = new Map(rows.map((r) => [Number(r.id), num(r.rk)]));
+		const limit = Math.min(radius ?? Number.POSITIVE_INFINITY, cutoff ?? Number.POSITIVE_INFINITY);
+		const hits: Array<{ id: number; uuid: string; m: Measured; rank: number | null }> = [];
+		const ids = rows.map((r) => Number(r.id));
+		for (let i = 0; i < ids.length; i += GEOMETRI_OMGANG) {
+			const chunk = ids.slice(i, i + GEOMETRI_OMGANG);
+			const geo = await this.all("SELECT l.id, l.uuid, l.geometri FROM lamning l WHERE l.id IN (SELECT value FROM json_each(?))", [
+				JSON.stringify(chunk),
+			]);
+			for (const g of geo) {
+				const m = measure(p, g.geometri);
+				if (!m || m.distance > limit) continue;
+				const id = Number(g.id);
+				hits.push({ id, uuid: String(g.uuid), m, rank: rank.get(id) ?? null });
+			}
+		}
+		return { hits, cutoff };
+	}
+
+	/** Träffrader (med utdrag runt sökorden när `fts` finns) för givna id, i godtycklig ordning. */
+	private async hitRows(ids: number[], fts: FtsQuery | null): Promise<Map<number, Row>> {
+		if (!ids.length) return new Map();
+		const rows = fts
+			? await this.all(
+					{
+						sql: `SELECT ${HIT_COLUMNS}${SNIPPETS} FROM lamning l CROSS JOIN lamning_fts f ON f.rowid = l.id WHERE l.id IN (SELECT value FROM json_each(?)) AND f.lamning_fts MATCH ?`,
+						params: [JSON.stringify(ids), fts.match],
+					},
+				)
+			: await this.all(`SELECT ${HIT_COLUMNS} FROM lamning l WHERE l.id IN (SELECT value FROM json_each(?))`, [JSON.stringify(ids)]);
+		return new Map(rows.map((r) => [Number(r.id), r]));
+	}
+
+	/**
 	 * Fulltextsök med filter. Med sökord rangordnas träffarna med bm25 (typ och
 	 * namn väger tyngst, sedan tradition, beskrivning och terräng); utan sökord
 	 * i lämningsnummerordning. Med `nara` filtreras på exakt avstånd till
 	 * geometrin, och utan sökord sorteras närmast först.
+	 *
+	 * Högst MAX_OFFSET träffar går att bläddra till (`nabara`); en sida bortom
+	 * det ger en tom träfflista (granskningen, punkt 6). Utdrag räknas bara för
+	 * den sida som returneras (punkt 9).
 	 */
 	async searchIndex(filter: IndexSearchFilter, page: { antal?: number; sida?: number } = {}): Promise<IndexSearchPage> {
 		const antal = clampInt(page.antal, 15, 1, MAX_ANTAL);
-		const sida = clampInt(page.sida, 1, 1, 1 + Math.floor(MAX_OFFSET / antal));
+		const sida = clampInt(page.sida, 1, 1, Number.MAX_SAFE_INTEGER);
 		const offset = (sida - 1) * antal;
 		const b = buildFilter(filter);
 		const sokord = b.fts ? b.fts.terms.map((t) => `${t.term}${t.prefix ? "*" : ""}`) : [];
 		const byggdatum = await this.byggdatum();
+		const beyond = offset >= MAX_OFFSET;
 
-		// CROSS JOIN tvingar FTS-tabellen att vara yttre loop. Annars kan planeraren
-		// låta ett selektivt filter driva och utvärdera MATCH en gång per rad (FTS5-fälla).
-		const ftsFrom = "FROM lamning_fts f CROSS JOIN lamning l ON l.id = f.rowid";
-		const ftsCond: SqlPart[] = b.fts ? [{ sql: "f.lamning_fts MATCH ?", params: [b.fts.match] }] : [];
-		const w = where(b.conditions, ftsCond);
-		const from = b.fts ? ftsFrom : "FROM lamning l";
-		const rank = "bm25(lamning_fts, 4.0, 4.0, 1.0, 2.0, 0.5)";
-		const snippets = b.fts
-			? [2, 3, 4]
-					.map((c, i) => `, snippet(lamning_fts, ${c}, '«', '»', ' … ', 32) AS ${["s_besk", "s_trad", "s_terr"][i]}`)
-					.join("")
-			: "";
-
+		let totalt: number;
+		let ungefar = false;
+		let pageIds: Array<{ id: number; d?: number; dir?: string | null }>;
 		if (!b.nara) {
-			const order = b.fts ? `ORDER BY ${rank}` : "ORDER BY l.lamningsnummer, l.id";
-			const [countRows, rows] = await this.batch([
-				this.stmt({ sql: `SELECT count(*) AS c ${from} ${w.sql}`, params: w.params }),
-				this.stmt({ sql: `SELECT ${HIT_COLUMNS}${snippets} ${from} ${w.sql} ${order} LIMIT ? OFFSET ?`, params: w.params }, [antal, offset]),
-			]);
-			const areas = await this.areasFor(rows.map((r) => Number(r.id)));
-			return {
-				totalt: num(countRows[0]?.c) ?? 0,
-				traffar: rows.map((r) => this.toHit(r, areas.get(Number(r.id)), chooseUtdrag(r))),
-				kalla: KALLA_INDEX,
-				byggdatum,
-				sokord,
-			};
+			// CROSS JOIN tvingar FTS-tabellen att vara yttre loop. Annars kan planeraren
+			// låta ett selektivt filter driva och utvärdera MATCH en gång per rad (FTS5-fälla).
+			const from = b.fts ? "FROM lamning_fts f CROSS JOIN lamning l ON l.id = f.rowid" : "FROM lamning l";
+			const w = where(b.conditions, b.fts ? [{ sql: "f.lamning_fts MATCH ?", params: [b.fts.match] }] : []);
+			const order = b.fts ? `ORDER BY ${RANK}, l.id` : `ORDER BY ${ORDER_LAMNINGSNUMMER}`;
+			const stmts = [this.stmt({ sql: `SELECT count(*) AS c ${from} ${w.sql}`, params: w.params })];
+			if (!beyond) stmts.push(this.stmt({ sql: `SELECT l.id ${from} ${w.sql} ${order} LIMIT ? OFFSET ?`, params: w.params }, [antal, offset]));
+			const [countRows, idRows = []] = await this.batch(stmts);
+			totalt = num(countRows[0]?.c) ?? 0;
+			pageIds = idRows.map((r) => ({ id: Number(r.id) }));
+		} else {
+			const { hits, cutoff } = await this.nearCandidates(b.conditions, b.fts, b.nara.p, b.nara.radie_m);
+			ungefar = cutoff !== null;
+			if (b.fts) hits.sort((x, y) => (x.rank ?? 0) - (y.rank ?? 0) || x.id - y.id);
+			else hits.sort((x, y) => x.m.distance - y.m.distance || x.id - y.id);
+			totalt = hits.length;
+			pageIds = beyond ? [] : hits.slice(offset, offset + antal).map((h) => ({ id: h.id, d: h.m.distance, dir: h.m.dir }));
 		}
-
-		// Med `nara`: hämta kandidater i rutan, räkna exakt avstånd, filtrera och sortera.
-		const order = b.fts ? `ORDER BY ${rank}` : "";
-		const cand = await this.all(
-			{ sql: `SELECT l.id, l.geometri ${from} ${w.sql} ${order} LIMIT ?`, params: w.params },
-			[MAX_KANDIDATER + 1],
-		);
-		const ungefar = cand.length > MAX_KANDIDATER;
-		const nara = b.nara;
-		const within: Array<{ id: number; d: number; dir: string | null }> = [];
-		for (const r of cand.slice(0, MAX_KANDIDATER)) {
-			const d = distanceTo(nara.p, r.geometri);
-			if (d && d.distance <= nara.radie_m) within.push({ id: Number(r.id), d: d.distance, dir: d.dir });
-		}
-		if (!b.fts) within.sort((x, y) => x.d - y.d || x.id - y.id);
-		const pageIds = within.slice(offset, offset + antal);
 		const ids = pageIds.map((x) => x.id);
-		const rows = ids.length
-			? await this.all(
-					{
-						sql: `SELECT ${HIT_COLUMNS}${snippets} ${from} WHERE l.id IN (SELECT value FROM json_each(?))${b.fts ? " AND f.lamning_fts MATCH ?" : ""}`,
-						params: b.fts ? [JSON.stringify(ids), b.fts.match] : [JSON.stringify(ids)],
-					},
-				)
-			: [];
-		const byId = new Map(rows.map((r) => [Number(r.id), r]));
-		const areas = await this.areasFor(ids);
+		const [rows, areas] = await Promise.all([this.hitRows(ids, b.fts), this.areasFor(ids)]);
 		const traffar: IndexHit[] = [];
 		for (const x of pageIds) {
-			const r = byId.get(x.id);
+			const r = rows.get(x.id);
 			if (!r) continue;
-			traffar.push({
-				...this.toHit(r, areas.get(x.id), chooseUtdrag(r)),
-				avstand_m: Math.round(x.d),
-				vaderstreck: x.dir,
-			});
+			const hit = this.toHit(r, areas.get(x.id), chooseUtdrag(r));
+			traffar.push(x.d !== undefined ? { ...hit, avstand_m: Math.round(x.d), vaderstreck: x.dir ?? null } : hit);
 		}
 		return {
-			totalt: within.length,
+			totalt,
+			nabara: Math.min(totalt, MAX_OFFSET),
 			traffar,
 			kalla: KALLA_INDEX,
 			byggdatum,
@@ -361,11 +496,83 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 		};
 	}
 
+	/**
+	 * Rangordnade UUID för hela filtret (högst `limit`), utan radinnehåll. Samma
+	 * ordning som searchIndex: bm25 med sökord, annars närmast först med `nara`,
+	 * annars lämningsnummer. Används för sammanslagning med den semantiska kanalen.
+	 */
+	async searchRanked(filter: IndexSearchFilter, limit: number): Promise<RankedPage> {
+		const lim = clampInt(limit, 100, 1, MAX_KANDIDATER);
+		const b = buildFilter(filter);
+		const sokord = b.fts ? b.fts.terms.map((t) => `${t.term}${t.prefix ? "*" : ""}`) : [];
+		if (!b.nara) {
+			const from = b.fts ? "FROM lamning_fts f CROSS JOIN lamning l ON l.id = f.rowid" : "FROM lamning l";
+			const w = where(b.conditions, b.fts ? [{ sql: "f.lamning_fts MATCH ?", params: [b.fts.match] }] : []);
+			const order = b.fts ? `ORDER BY ${RANK}, l.id` : `ORDER BY ${ORDER_LAMNINGSNUMMER}`;
+			const [countRows, rows] = await this.batch([
+				this.stmt({ sql: `SELECT count(*) AS c ${from} ${w.sql}`, params: w.params }),
+				this.stmt({ sql: `SELECT l.uuid ${from} ${w.sql} ${order} LIMIT ?`, params: w.params }, [lim]),
+			]);
+			return { totalt: num(countRows[0]?.c) ?? 0, ids: rows.map((r) => ({ uuid: String(r.uuid) })), sokord };
+		}
+		const { hits, cutoff } = await this.nearCandidates(b.conditions, b.fts, b.nara.p, b.nara.radie_m);
+		if (b.fts) hits.sort((x, y) => (x.rank ?? 0) - (y.rank ?? 0) || x.id - y.id);
+		else hits.sort((x, y) => x.m.distance - y.m.distance || x.id - y.id);
+		return {
+			totalt: hits.length,
+			ids: hits.slice(0, lim).map((h) => ({ uuid: h.uuid, avstand_m: Math.round(h.m.distance), vaderstreck: h.m.dir })),
+			sokord,
+			...(cutoff !== null ? { totalt_ungefar: true } : {}),
+		};
+	}
+
+	/**
+	 * Träffar för givna UUID som uppfyller filtret (utom sökorden, som här bara
+	 * används för utdrag). UUID som inte finns eller inte uppfyller filtret
+	 * saknas i svaret. Med `nara` räknas exakt avstånd och lämningar utanför
+	 * radien stryks. Högst MAX_ANTAL åt gången.
+	 */
+	async hitsByUuids(uuids: string[], filter: IndexSearchFilter = {}): Promise<Map<string, IndexHit>> {
+		const out = new Map<string, IndexHit>();
+		const list = [...new Set(uuids.filter((u) => typeof u === "string" && UUID_RE.test(u)).map((u) => u.toLowerCase()))];
+		if (!list.length) return out;
+		if (list.length > MAX_ANTAL) throw new IndexInputError(`Högst ${MAX_ANTAL} poster åt gången.`);
+		const b = buildFilter({ ...filter, fraga: undefined, ord: undefined });
+		const fts = buildFilter({ fraga: filter.fraga, ord: filter.ord }).fts;
+		const idCond: SqlPart = { sql: "l.uuid IN (SELECT value FROM json_each(?))", params: [JSON.stringify(list)] };
+		const w = where(b.conditions, [idCond]);
+		const rows = await this.all({ sql: `SELECT ${HIT_COLUMNS}, l.geometri FROM lamning l ${w.sql}`, params: w.params });
+		const dist = new Map<number, { d: number; dir: string | null }>();
+		const kept: Row[] = [];
+		for (const r of rows) {
+			if (b.nara) {
+				const d = distanceTo(b.nara.p, r.geometri);
+				if (!d || d.distance > b.nara.radie_m) continue;
+				dist.set(Number(r.id), { d: d.distance, dir: d.dir });
+			}
+			kept.push(r);
+		}
+		if (!kept.length) return out;
+		const ids = kept.map((r) => Number(r.id));
+		// Utdrag runt sökorden för de träffar som innehåller dem; övriga får beskrivningens början.
+		const [snippets, areas] = await Promise.all([fts ? this.hitRows(ids, fts) : new Map<number, Row>(), this.areasFor(ids)]);
+		for (const r of kept) {
+			const id = Number(r.id);
+			const sn = snippets.get(id);
+			const hit = this.toHit(r, areas.get(id), sn ? chooseUtdrag(sn) : lead(str(r.beskrivning)));
+			const d = dist.get(id);
+			out.set(hit.uuid, d ? { ...hit, avstand_m: Math.round(d.d), vaderstreck: d.dir } : hit);
+		}
+		return out;
+	}
+
 	// ------------------------------------------------------------ närhet
 
 	/**
 	 * Lämningar nära en punkt (radie) eller i en ruta, sorterade efter exakt
 	 * avstånd i SWEREF 99 TM till närmaste punkt på geometrin (0 inom en yta).
+	 * I mycket täta områden (fler än MAX_KANDIDATER kandidater) är svaret
+	 * fullständigt inom `fullstandig_inom_m` och `totalt_ungefar` sätts.
 	 */
 	async nearby(q: NearbyIndexQuery): Promise<NearbyIndexPage> {
 		const antal = clampInt(q.antal, 25, 1, MAX_ANTAL);
@@ -385,32 +592,32 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 			lamningstyp: q.lamningstyp,
 			antikvarisk_bedomning: q.antikvarisk_bedomning as IndexSearchFilter["antikvarisk_bedomning"],
 		});
-		const w = where([...f.conditions, spatialCondition(box)]);
-		const cand = await this.all({ sql: `SELECT l.id, l.geometri FROM lamning l ${w.sql} LIMIT ?`, params: w.params }, [MAX_KANDIDATER + 1]);
-		const ungefar = cand.length > MAX_KANDIDATER;
-		const scored: Array<{ id: number; d: number; dir: string | null }> = [];
-		for (const r of cand.slice(0, MAX_KANDIDATER)) {
-			const d = distanceTo(center, r.geometri);
-			if (!d) continue;
-			if (radius !== null && d.distance > radius) continue;
-			scored.push({ id: Number(r.id), d: d.distance, dir: d.dir });
-		}
-		scored.sort((a, b) => a.d - b.d || a.id - b.id);
-		const top = scored.slice(0, antal);
+		const { hits, cutoff } = await this.nearCandidates([...f.conditions, spatialCondition(box)], null, center, radius);
+		hits.sort((a, b) => a.m.distance - b.m.distance || a.id - b.id);
+		const top = hits.slice(0, antal);
 		const ids = top.map((x) => x.id);
-		const [rows, byggdatum] = await Promise.all([
-			ids.length ? this.all(`SELECT ${HIT_COLUMNS} FROM lamning l WHERE l.id IN (SELECT value FROM json_each(?))`, [JSON.stringify(ids)]) : [],
-			this.byggdatum(),
-		]);
-		const byId = new Map(rows.map((r) => [Number(r.id), r]));
-		const areas = await this.areasFor(ids);
+		const [rows, areas, byggdatum] = await Promise.all([this.hitRows(ids, null), this.areasFor(ids), this.byggdatum()]);
 		const traffar: NearbyIndexPage["traffar"] = [];
 		for (const x of top) {
-			const r = byId.get(x.id);
+			const r = rows.get(x.id);
 			if (!r) continue;
-			traffar.push({ ...this.toHit(r, areas.get(x.id), lead(str(r.beskrivning))), avstand_m: Math.round(x.d), vaderstreck: x.dir });
+			traffar.push({
+				...this.toHit(r, areas.get(x.id), lead(str(r.beskrivning))),
+				avstand_m: Math.round(x.m.distance),
+				vaderstreck: x.m.dir,
+				narmaste_punkt_sweref: x.m.point,
+				narmaste_typ: x.m.typ,
+				geometrier: x.m.geometrier,
+				geometrityper: x.m.geometrityper,
+			});
 		}
-		return { totalt: scored.length, traffar, kalla: KALLA_INDEX, byggdatum, ...(ungefar ? { totalt_ungefar: true } : {}) };
+		return {
+			totalt: hits.length,
+			traffar,
+			kalla: KALLA_INDEX,
+			byggdatum,
+			...(cutoff !== null ? { totalt_ungefar: true, fullstandig_inom_m: Math.floor(Math.min(cutoff, radius ?? cutoff)) } : {}),
+		};
 	}
 
 	/** NearbySource: lämningar vars ruta skär `bbox`, med geometri i WGS 84. */
@@ -464,6 +671,36 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 			if (!STATISTIK_DIMENSIONER.includes(d)) throw new IndexInputError(`gruppera_pa: okänd nivå ${String(d)}.`);
 		if (gruppera_pa.length === 2 && gruppera_pa[0] === gruppera_pa[1]) throw new IndexInputError("gruppera_pa: två olika nivåer.");
 		const b = buildFilter(filter);
+		const byggdatum = await this.byggdatum();
+
+		// Snabbväg: en områdesnivå utan filter räknas direkt ur lamning_omrade, utan att läsa lamning (punkt 9).
+		const d0 = gruppera_pa[0];
+		if (gruppera_pa.length === 1 && !b.conditions.length && !b.fts && !b.nara && AREA_DIMS.has(d0)) {
+			const [rows, tot] = await this.batch([
+				this.stmt(
+					`SELECT ${areaLabel("o", d0)} AS v0, count(*) AS antal FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE o.niva = ? GROUP BY o.id ORDER BY antal DESC, v0`,
+					[d0],
+				),
+				this.stmt(
+					"SELECT (SELECT count(*) FROM lamning) AS c, (SELECT count(DISTINCT lo.lamning_id) FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE o.niva = ?) AS med",
+					[d0],
+				),
+			]);
+			const totalt = num(tot[0]?.c) ?? 0;
+			const saknas = totalt - (num(tot[0]?.med) ?? 0);
+			const grupper = rows.map((r) => ({ varden: [String(r.v0)], antal: num(r.antal) ?? 0 }));
+			if (saknas > 0) grupper.push({ varden: ["(saknas)"], antal: saknas });
+			grupper.sort((a, b) => b.antal - a.antal || a.varden[0].localeCompare(b.varden[0]));
+			return {
+				gruppera_pa,
+				totalt,
+				grupper: grupper.slice(0, MAX_STATISTIK_RADER),
+				avkortad: grupper.length > MAX_STATISTIK_RADER,
+				kalla: KALLA_INDEX,
+				byggdatum,
+			};
+		}
+
 		const extra: SqlPart[] = b.fts ? [{ sql: "l.id IN (SELECT rowid FROM lamning_fts WHERE lamning_fts MATCH ?)", params: [b.fts.match] }] : [];
 		const joins: SqlPart[] = [];
 		const values: string[] = [];
@@ -485,15 +722,17 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 						sql: `LEFT JOIN (SELECT lo.lamning_id, o.namn, o.lan FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE o.niva = ?) ${a} ON ${a}.lamning_id = l.id`,
 						params: [d],
 					});
-					values.push(
-						d === "socken"
-							? `coalesce(${a}.namn || CASE WHEN ${a}.lan <> '' THEN ' (' || ${a}.lan || ')' ELSE '' END, '(saknas)')`
-							: `coalesce(${a}.namn, '(saknas)')`,
-					);
+					values.push(`coalesce(${areaLabel(a, d)}, '(saknas)')`);
 			}
 		});
-		const w = where(b.conditions, extra);
-		// Exakt avstånd tillämpas inte i statistiken; med `nara` räknas lämningar vars ruta skär cirkelns ruta.
+		let w = where(b.conditions, extra);
+		let ungefar = false;
+		if (b.nara) {
+			// Exakt avstånd till geometrin, som i sökningen.
+			const { hits, cutoff } = await this.nearCandidates(b.conditions, b.fts, b.nara.p, b.nara.radie_m);
+			ungefar = cutoff !== null;
+			w = { sql: "WHERE l.id IN (SELECT value FROM json_each(?))", params: [JSON.stringify(hits.map((h) => h.id))] };
+		}
 		const cols = values.map((v, i) => `${v} AS v${i}`).join(", ");
 		const groupBy = values.map((_, i) => `v${i}`).join(", ");
 		const sql = `SELECT ${cols}, count(*) AS antal FROM lamning l ${joins.map((j) => j.sql).join(" ")} ${w.sql} GROUP BY ${groupBy} ORDER BY antal DESC, ${groupBy} LIMIT ?`;
@@ -510,7 +749,8 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 			})),
 			avkortad: rows.length > MAX_STATISTIK_RADER,
 			kalla: KALLA_INDEX,
-			byggdatum: await this.byggdatum(),
+			byggdatum,
+			...(ungefar ? { totalt_ungefar: true } : {}),
 		};
 	}
 
@@ -518,10 +758,12 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 
 	/**
 	 * Slå upp lämningsnummer, RAÄ-nummer, UUID, K-samsök-URI eller publik länk
-	 * → UUID. Nycklarna i svaret är indata som de gavs; okända saknas.
+	 * → UUID. Nycklarna i svaret är indata som de gavs; okända saknas. Ett
+	 * RAÄ-nummer kan delas av flera lämningar (t.ex. "Leksand 963:1"); då ges
+	 * alla, i lämningsnummerordning.
 	 */
-	async resolveIds(ids: string[]): Promise<Map<string, string>> {
-		const out = new Map<string, string>();
+	async resolveIdsAll(ids: string[]): Promise<Map<string, string[]>> {
+		const out = new Map<string, string[]>();
 		if (!Array.isArray(ids) || !ids.length) return out;
 		if (ids.length > MAX_ANTAL) throw new IndexInputError(`Högst ${MAX_ANTAL} id åt gången.`);
 		const uuids = new Map<string, string>();
@@ -547,13 +789,27 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 			     OR raa_sok IN (SELECT value FROM json_each(?))`,
 			[JSON.stringify([...new Set(uuids.values())]), JSON.stringify([...ln.keys()]), JSON.stringify([...raa.keys()])],
 		);
+		rows.sort((a, b) => compareLamningsnummer(str(a.lamningsnummer), str(b.lamningsnummer)) || String(a.uuid).localeCompare(String(b.uuid)));
 		const known = new Set(rows.map((r) => String(r.uuid)));
-		for (const [input, u] of uuids) if (known.has(u)) out.set(input, u);
-		for (const r of rows) {
-			for (const input of ln.get(String(r.lamningsnummer)) ?? []) out.set(input, String(r.uuid));
-			for (const input of raa.get(String(r.raa_sok)) ?? []) if (!out.has(input)) out.set(input, String(r.uuid));
-		}
+		for (const [input, u] of uuids) if (known.has(u)) out.set(input, [u]);
+		const push = (input: string, uuid: string) => {
+			const l = out.get(input) ?? [];
+			if (!l.includes(uuid)) l.push(uuid);
+			out.set(input, l);
+		};
+		for (const r of rows) for (const input of ln.get(String(r.lamningsnummer)) ?? []) push(input, String(r.uuid));
+		for (const r of rows) for (const input of raa.get(String(r.raa_sok)) ?? []) push(input, String(r.uuid));
 		return out;
+	}
+
+	/**
+	 * Som resolveIdsAll, men ett UUID per indata. Ett RAÄ-nummer som delas av
+	 * flera lämningar ger den med lägst lämningsnummer; använd resolveIdsAll när
+	 * flertydigheten ska visas.
+	 */
+	async resolveIds(ids: string[]): Promise<Map<string, string>> {
+		const all = await this.resolveIdsAll(ids);
+		return new Map([...all].map(([k, v]) => [k, v[0]]));
 	}
 
 	/** IdResolver: lämningsnummer/RAÄ-nummer → UUID. */
@@ -670,6 +926,36 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 			: await this.all("SELECT typ, varde, count(DISTINCT lamning_id) AS antal FROM egenskap GROUP BY typ, varde ORDER BY typ, antal DESC LIMIT 5000");
 		return rows.map((r) => ({ typ: String(r.typ), varde: String(r.varde), antal: num(r.antal) ?? 0 }));
 	}
+}
+
+interface Measured {
+	distance: number;
+	dir: string | null;
+	point: Planar;
+	typ: string;
+	geometrier: number;
+	geometrityper: string[];
+}
+
+/** Som distanceTo, men med närmaste punkt och vilken delgeometri den ligger på. */
+function measure(p: Planar, geometri: unknown): Measured | null {
+	const g = parseGeometry(geometri);
+	if (!g) return null;
+	const parts = g.type === "GeometryCollection" ? g.geometries : [g];
+	let best: { distance: number; point: Planar; typ: string } | null = null;
+	for (const part of parts) {
+		const r = nearestPoint(p, wgsToSweref(part));
+		if (Number.isFinite(r.distance) && (!best || r.distance < best.distance)) best = { distance: r.distance, point: r.point, typ: part.type };
+	}
+	if (!best) return null;
+	return {
+		distance: best.distance,
+		dir: compassDirection(p, best.point),
+		point: best.point,
+		typ: best.typ,
+		geometrier: parts.length,
+		geometrityper: [...new Set(parts.map((x) => x.type))],
+	};
 }
 
 /** Avstånd och väderstreck från `p` (SWEREF) till geometrin (GeoJSON i WGS 84). */

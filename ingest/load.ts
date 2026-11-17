@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import { GpkgReader, newStats, type ReadStats } from "./read.ts";
+import { avstamning, GpkgReader, newStats, type ReadStats } from "./read.ts";
 import type { Referens } from "./referens.ts";
 import { FileSink } from "./sink.ts";
 import { batchStatements, deleteLamningar, kategoriStatements, type SqlSink, synkStatements } from "./sql.ts";
@@ -37,7 +37,22 @@ function footer(sink: SqlSink, info: Parameters<typeof synkStatements>[0]) {
 	for (const s of synkStatements(info)) sink.emit(s);
 }
 
-/** Läs hela filen till mottagaren (grundladdning). */
+/** Fel när källans antal inte stämmer med det som lästes (se avstamning i read.ts). */
+export class AvstamningError extends Error {
+	readonly avvikelser: string[];
+	constructor(avvikelser: string[]) {
+		super(`Avstämningen mot källan misslyckades:\n- ${avvikelser.join("\n- ")}`);
+		this.name = "AvstamningError";
+		this.avvikelser = avvikelser;
+	}
+}
+
+function checkCounts(stats: ReadStats) {
+	const avvikelser = avstamning(stats);
+	if (avvikelser.length) throw new AvstamningError(avvikelser);
+}
+
+/** Läs hela filen till mottagaren (grundladdning). Avbryter med AvstamningError om antalen inte stämmer. */
 export function load(gpkgPath: string, sink: SqlSink, opts: { referens?: Referens | null; log?: (s: string) => void } = {}): LoadResult {
 	const t0 = Date.now();
 	const startad = new Date().toISOString();
@@ -57,6 +72,8 @@ export function load(gpkgPath: string, sink: SqlSink, opts: { referens?: Referen
 			}
 		}
 		batchStatements(batch, sink);
+		// Avstämning före synkraden: avviker antalen skrivs ingen synk_status, och laddningen räknas som misslyckad.
+		checkCounts(stats);
 		footer(sink, {
 			typ: "grundladdning",
 			startad,
@@ -161,6 +178,8 @@ export function diff(
 				}
 			}
 		}
+		// En lämning som tappats vid läsningen får aldrig tolkas som borttagen.
+		checkCounts(stats);
 		for (const u of existing.keys()) if (!seen.has(u)) res.borttagna.push(u);
 		res.borttagna.sort();
 		if (sink) {

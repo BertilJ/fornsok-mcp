@@ -1,9 +1,10 @@
 /**
  * Källagret: ett gränssnitt per förmåga, en implementation per källa.
  *
- * Etapp 1 kopplar förmågorna till levande källor (K-samsök, OGC API Features,
- * Fornsök-appen). Etapp 3–5 lägger till en indexkälla (D1/Vectorize) som
- * implementerar samma gränssnitt; verktygen behöver då inte skrivas om.
+ * Levande källor (K-samsök, OGC API Features, Fornsök-appen) och indexet
+ * (src/store, D1) implementerar samma gränssnitt. Verktygen använder indexet
+ * när det finns och faller tillbaka på de levande källorna (SPEC 8). Den
+ * semantiska kanalen (Vectorize, etapp 5) ansluts via `SemanticSearch` nedan.
  */
 import type { Geometry } from "../geo/geometry";
 
@@ -28,19 +29,38 @@ export interface Sweref {
 
 // ---------------------------------------------------------------- sök
 
-/** Filter efter att namn slagits upp till de värden källan använder. */
+/**
+ * Filter efter att namn slagits upp till de värden källan använder.
+ *
+ * Gemensamt för alla sökkällor. Indexet (src/store) stöder alla fält; K-samsök
+ * stöder inte `fraga`, `kategori`, `egenskap` och `nara` – verktyget översätter
+ * dem (`fraga` → `ord`, `kategori` → `lamningstyp`, `nara` → `bbox`) eller
+ * avvisar frågan i reservläget (`egenskap`).
+ */
 export interface ResolvedSearchFilter {
+	/** Fritext; delas i ord och OCH-kopplas med `ord`. Bara indexet. */
+	fraga?: string;
+	/** Ord som alla måste finnas (OCH). `*` sist i ett ord ger prefixsökning. */
 	ord?: string[];
 	nummer?: string[];
 	lamningstyp?: string[];
+	/** Kategorier av lämningstyper. Bara indexet. */
+	kategori?: string[];
 	antikvarisk_bedomning?: Bedomning[];
 	kommun?: string[];
 	/** Socken med ev. länsavgränsning när namnet finns i flera län. */
 	socken?: Array<{ namn: string; lan?: string[]; kommun?: string[] }>;
 	landskap?: string[];
 	lan?: string[];
+	/**
+	 * Egenskaper. Samma typ: något av värdena. Olika typer: alla måste finnas.
+	 * Gäller även ingående lämningars egenskaper. Bara indexet.
+	 */
+	egenskap?: Egenskap[];
 	/** Ruta i WGS 84: [minLon, minLat, maxLon, maxLat]. */
 	bbox?: [number, number, number, number];
+	/** Punkt och radie; exakt avstånd till geometrin. Bara indexet. */
+	nara?: { lat: number; lon: number; radie_m: number };
 }
 
 export interface SearchHit {
@@ -176,7 +196,11 @@ export interface NearbyQuery {
 }
 
 export interface NearbyPage {
-	/** Antal geometrier (inte lämningar) i rutan enligt källan. */
+	/**
+	 * Antal träffar i rutan enligt källan. OGC-källan räknar geometrier (ett
+	 * objekt per geometri, så en lämning kan räknas flera gånger); indexet
+	 * räknar lämningar.
+	 */
 	numberMatched: number | null;
 	/** Antal geometrier i svaret (före ev. bortfall av objekt utan lämningsnummer). */
 	numberReturned: number | null;
@@ -317,4 +341,35 @@ export interface Version {
 export interface HistorySource {
 	/** Versionshistoriken, nyast först. null om lämningen inte finns. */
 	getVersioner(uuid: string): Promise<Version[] | null>;
+}
+
+// ---------------------------------------------------------------- semantisk sökning
+
+/** En semantisk träff: lämningens UUID och likhet (högre är bättre). */
+export interface SemanticHit {
+	uuid: string;
+	score: number;
+}
+
+/**
+ * Anslutningspunkt för den semantiska kanalen (SPEC 5.2, etapp 5). Byggs i
+ * src/semantic/ och skickas in via `createDeps({ semantic })`. Saknas den
+ * används bara ordsök, och `lage: "betydelse"` ger ett tydligt fel.
+ *
+ * Kontrakt:
+ * - `scopeCovers(filter)`: true bara om filtrets geografiska avgränsning (län,
+ *   kommun, socken, landskap eller `nara`) ligger helt inom det semantiska
+ *   omfånget. Utan geografiskt filter: false (annars får rikstäckande frågor
+ *   slagsida mot omfånget). Synkron och utan I/O.
+ * - `search(fraga, filter, topK)`: högst `topK` träffar, bäst först. Får
+ *   tillämpa det av filtret som går före likhetssökningen (metadata); verktyget
+ *   kontrollerar ändå varje träff mot hela filtret i indexet, så träffar
+ *   utanför filtret är ofarliga (de stryks). Kastar vid fel; verktyget faller
+ *   då tillbaka på ordsök (`lage: "auto"`) eller ger ett fel (`"betydelse"`).
+ */
+export interface SemanticSearch {
+	search(fraga: string, filter: ResolvedSearchFilter, topK: number): Promise<SemanticHit[]>;
+	scopeCovers(filter: ResolvedSearchFilter): boolean;
+	/** Beskrivning av omfånget för felmeddelanden, t.ex. "Dalarnas län". */
+	readonly omfang?: string;
 }

@@ -17,6 +17,11 @@ import { IndexInputError } from "./d1";
 /** Höjdgränser (meter) för rumsklasserna 0–2; större i klass 3. Används även av ingest/transform.ts. */
 export const RUMSKLASS_HOJD = [1000, 8000, 64000] as const;
 
+/** SWEREF 99 TM:s medelmeridian (grader östlig längd). */
+const MEDELMERIDIAN = 15;
+/** Så många delar per kant när en WGS 84-ruta räknas om. */
+const KANTPUNKTER = 16;
+
 /** Ruta i SWEREF 99 TM: [minE, minN, maxE, maxN]. */
 export type SwerefBox = [number, number, number, number];
 
@@ -39,15 +44,21 @@ export function wgsBoxToSweref(b: [number, number, number, number]): SwerefBox {
 	if (!isInSweden({ lat: minLat, lon: minLon }) || !isInSweden({ lat: maxLat, lon: maxLon })) {
 		throw new IndexInputError("Rutan ligger utanför Sverige.");
 	}
-	// Kanterna är krökta i SWEREF; ta med hörn och mittpunkter på kanterna.
+	// Kanterna är krökta i SWEREF 99 TM: en breddgrad har lägst N vid
+	// medelmeridianen (15° O) och böjer sig söderut mot den, så sydkanten måste
+	// provas där (granskningen, punkt 4). Kanterna provas därför tätt, med 15° O
+	// när den ligger i rutan, och rutan vidgas med en meters marginal.
+	const lons = [...Array.from({ length: KANTPUNKTER + 1 }, (_, i) => minLon + ((maxLon - minLon) * i) / KANTPUNKTER)];
+	if (minLon < MEDELMERIDIAN && MEDELMERIDIAN < maxLon) lons.push(MEDELMERIDIAN);
+	const lats = Array.from({ length: KANTPUNKTER + 1 }, (_, i) => minLat + ((maxLat - minLat) * i) / KANTPUNKTER);
 	const pts: Planar[] = [];
-	for (const lat of [minLat, (minLat + maxLat) / 2, maxLat])
-		for (const lon of [minLon, (minLon + maxLon) / 2, maxLon]) pts.push(toPlanar({ lat, lon }));
+	for (const lon of lons) for (const lat of [minLat, maxLat]) pts.push(toPlanar({ lat, lon }));
+	for (const lat of lats) for (const lon of [minLon, maxLon]) pts.push(toPlanar({ lat, lon }));
 	return [
-		Math.floor(Math.min(...pts.map((p) => p.e))),
-		Math.floor(Math.min(...pts.map((p) => p.n))),
-		Math.ceil(Math.max(...pts.map((p) => p.e))),
-		Math.ceil(Math.max(...pts.map((p) => p.n))),
+		Math.floor(Math.min(...pts.map((p) => p.e)) - 1),
+		Math.floor(Math.min(...pts.map((p) => p.n)) - 1),
+		Math.ceil(Math.max(...pts.map((p) => p.e)) + 1),
+		Math.ceil(Math.max(...pts.map((p) => p.n)) + 1),
 	];
 }
 
@@ -67,13 +78,15 @@ export function spatialCondition(box: SwerefBox, alias = "l"): SqlPart {
 	const [minE, minN, maxE, maxN] = box;
 	const parts: string[] = [];
 	const params: unknown[] = [];
+	// Klassnumret är en konstant i koden (inte indata) och skrivs i SQL-texten, så
+	// att villkoret tar 19 parametrar i stället för 23 (D1 tillåter 100 per fråga).
 	RUMSKLASS_HOJD.forEach((h, k) => {
 		parts.push(
-			"SELECT id FROM lamning WHERE rumsklass = ? AND min_n BETWEEN ? AND ? AND max_n >= ? AND min_e <= ? AND max_e >= ?",
+			`SELECT id FROM lamning WHERE rumsklass = ${k} AND min_n BETWEEN ? AND ? AND max_n >= ? AND min_e <= ? AND max_e >= ?`,
 		);
-		params.push(k, minN - h, maxN, minN, maxE, minE);
+		params.push(minN - h, maxN, minN, maxE, minE);
 	});
-	parts.push("SELECT id FROM lamning WHERE rumsklass = ? AND min_n <= ? AND max_n >= ? AND min_e <= ? AND max_e >= ?");
-	params.push(RUMSKLASS_HOJD.length, maxN, minN, maxE, minE);
+	parts.push(`SELECT id FROM lamning WHERE rumsklass = ${RUMSKLASS_HOJD.length} AND min_n <= ? AND max_n >= ? AND min_e <= ? AND max_e >= ?`);
+	params.push(maxN, minN, maxE, minE);
 	return { sql: `${alias}.id IN (${parts.join(" UNION ALL ")})`, params };
 }

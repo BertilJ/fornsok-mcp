@@ -204,13 +204,22 @@ export function deleteLamningar(uuids: string[], maxBytes = MAX_STATEMENT_BYTES)
 }
 
 /** Lämningstyp → kategori ersätts helt. */
+/**
+ * Lämningstyp → kategori. Säker ordning: först läggs alla nya par till, sedan
+ * tas par som inte längre finns bort. Avbryts filen däremellan finns
+ * tabellen kvar (med ev. några inaktuella par), aldrig tom.
+ */
 export function kategoriStatements(typer: Array<{ namn: string; kategorier: string[] }>): string[] {
 	const rows: string[] = [];
-	for (const t of typer) for (const k of t.kategorier) rows.push(`(${lit(t.namn)}, ${lit(k)})`);
-	return [
-		"DELETE FROM lamningstyp_kategori;",
-		...multiRow("INSERT OR IGNORE INTO lamningstyp_kategori (lamningstyp, kategori) VALUES\n", rows, ""),
-	];
+	const pairs: Array<[string, string]> = [];
+	for (const t of typer)
+		for (const k of t.kategorier) {
+			rows.push(`(${lit(t.namn)}, ${lit(k)})`);
+			pairs.push([t.namn, k]);
+		}
+	const del = `DELETE FROM lamningstyp_kategori WHERE NOT EXISTS (SELECT 1 FROM json_each(${lit(JSON.stringify(pairs))}) j WHERE json_extract(j.value, '$[0]') = lamningstyp_kategori.lamningstyp AND json_extract(j.value, '$[1]') = lamningstyp_kategori.kategori);`;
+	if (bytes(del) > MAX_STATEMENT_BYTES) throw new Error("kategorilistan är för stor för en sats");
+	return [...multiRow("INSERT OR IGNORE INTO lamningstyp_kategori (lamningstyp, kategori) VALUES\n", rows, ""), del];
 }
 
 export interface SynkInfo {
@@ -225,8 +234,9 @@ export interface SynkInfo {
 }
 
 export function synkStatements(s: SynkInfo): string[] {
+	// Idempotent: en omkörning av samma fil lägger inte till en ny körningsrad.
 	const out = [
-		`INSERT INTO synk (typ, startad, klar, kalla, nya, andrade, borttagna) VALUES (${lit(s.typ)}, ${lit(s.startad)}, ${lit(s.klar)}, ${lit(s.kalla)}, ${lit(s.nya)}, ${lit(s.andrade)}, ${lit(s.borttagna)});`,
+		`INSERT INTO synk (typ, startad, klar, kalla, nya, andrade, borttagna) SELECT ${lit(s.typ)}, ${lit(s.startad)}, ${lit(s.klar)}, ${lit(s.kalla)}, ${lit(s.nya)}, ${lit(s.andrade)}, ${lit(s.borttagna)} WHERE NOT EXISTS (SELECT 1 FROM synk WHERE typ = ${lit(s.typ)} AND startad = ${lit(s.startad)});`,
 	];
 	const status = (k: string, v: string | null) =>
 		`INSERT INTO synk_status (nyckel, varde, andrad) VALUES (${lit(k)}, ${lit(v)}, ${lit(s.klar)}) ON CONFLICT(nyckel) DO UPDATE SET varde = excluded.varde, andrad = excluded.andrad;`;

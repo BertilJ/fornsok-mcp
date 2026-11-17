@@ -3,7 +3,8 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { GpkgError, parseGpkgGeometry } from "../../ingest/gpkg.ts";
 import { MIGRATION } from "../../ingest/sink.ts";
-import { batchStatements, lit, MAX_STATEMENT_BYTES, multiRow, type SqlSink } from "../../ingest/sql.ts";
+import { avstamning, newStats } from "../../ingest/read.ts";
+import { batchStatements, kategoriStatements, lit, MAX_STATEMENT_BYTES, multiRow, type SqlSink, synkStatements } from "../../ingest/sql.ts";
 import {
 	centroid,
 	combine,
@@ -304,6 +305,66 @@ describe("SQL", () => {
 		expect(q("SELECT count(*) AS c FROM omrade").c).toBe(4);
 		// FTS följer med, även för texten som fylldes på i delar.
 		expect(q("SELECT count(*) AS c FROM lamning_fts WHERE lamning_fts MATCH '\"citat\"'").c).toBe(1);
-		db.exec("INSERT INTO lamning_fts(lamning_fts) VALUES('integrity-check')");
+		db.exec("INSERT INTO lamning_fts(lamning_fts, rank) VALUES('integrity-check', 1)");
+	});
+});
+
+// ---------------------------------------------------------------- granskningens fynd (etapp 4)
+
+describe("granskning: FTS-kontroll, synkrad, kategorier, avstämning", () => {
+	it("integrity-check med rank 1 upptäcker att FTS-tabellen inte stämmer med lamning", () => {
+		const db = freshDb();
+		const posts = [toIndexPost(post({ uuid: "11111111-2222-4333-8444-555555555555", lamningsnummer: "L2001:9", beskrivning: "en hytta" }), new Indelning(null))];
+		const sink = new MemSink();
+		batchStatements(posts, sink);
+		for (const s of sink.statements) db.exec(s);
+		db.exec("INSERT INTO lamning_fts(lamning_fts, rank) VALUES('integrity-check', 1)");
+		// Ändra texten förbi triggrarna: utan rank märks det inte, med rank 1 ger kontrollen fel.
+		db.exec("DROP TRIGGER lamning_fts_au");
+		db.exec("UPDATE lamning SET beskrivning = 'något helt annat'");
+		expect(() => db.exec("INSERT INTO lamning_fts(lamning_fts) VALUES('integrity-check')")).not.toThrow();
+		expect(() => db.exec("INSERT INTO lamning_fts(lamning_fts, rank) VALUES('integrity-check', 1)")).toThrow();
+	});
+
+	it("synkStatements är idempotent: en omkörning ger ingen ny synkrad", () => {
+		const db = freshDb();
+		const info = { typ: "grundladdning" as const, startad: "2026-11-17T10:00:00Z", klar: "2026-11-17T10:05:00Z", kalla: "x", uttagsdatum: "2026-11-17", nya: 1, andrade: 0, borttagna: 0 };
+		for (let i = 0; i < 3; i++) for (const s of synkStatements(info)) db.exec(s);
+		expect((db.prepare("SELECT count(*) AS c FROM synk").get() as { c: number }).c).toBe(1);
+		expect((db.prepare("SELECT varde FROM synk_status WHERE nyckel = 'uttagsdatum'").get() as { varde: string }).varde).toBe("2026-11-17");
+	});
+
+	it("kategoriStatements: lägger till före borttagning, så att tabellen aldrig blir tom", () => {
+		const db = freshDb();
+		const gammal = kategoriStatements([{ namn: "Hyttområde", kategorier: ["Metallframställning och bergsbruk"] }, { namn: "Röse", kategorier: ["Gravar"] }]);
+		for (const s of gammal) db.exec(s);
+		const ny = kategoriStatements([{ namn: "Hyttområde", kategorier: ["Metallframställning och bergsbruk", "Industri"] }]);
+		expect(ny[ny.length - 1]).toMatch(/^DELETE FROM lamningstyp_kategori WHERE NOT EXISTS/);
+		expect(ny.some((s) => /^DELETE FROM lamningstyp_kategori;/.test(s))).toBe(false);
+		// Avbrott efter första satsen: alla gamla par finns kvar, de nya har lagts till.
+		db.exec(ny[0]);
+		expect((db.prepare("SELECT count(*) AS c FROM lamningstyp_kategori").get() as { c: number }).c).toBe(3);
+		for (const s of ny) db.exec(s);
+		const rows = db.prepare("SELECT lamningstyp, kategori FROM lamningstyp_kategori ORDER BY kategori").all();
+		expect(rows.map((r) => `${r.lamningstyp}/${r.kategori}`)).toEqual(["Hyttområde/Industri", "Hyttområde/Metallframställning och bergsbruk"]);
+	});
+
+	it("avstamning: tappade lämningar och oförklarade barnrader ger avvikelse", () => {
+		const st = newStats();
+		st.kalla = { lamningar: 3, geometrier: 4, egenskaper: 2, ingaende: 1 };
+		st.lamningar = 3;
+		st.geometrier = 3;
+		st.skippade.geometrier = 1;
+		st.egenskaper = 1;
+		st.foraldralosaPer.egenskaper = 1;
+		st.ingaende = 1;
+		expect(avstamning(st)).toEqual([]);
+		st.lamningar = 2;
+		st.skippade.lamningar = 1;
+		st.egenskaper = 0;
+		const a = avstamning(st);
+		expect(a.join("\n")).toMatch(/lämningar: källan har 3, skrivna 2/);
+		expect(a.join("\n")).toMatch(/egenskaper: .* 1 rader oförklarade/);
+		expect(avstamning(newStats())).toEqual(["källans antal saknas (läsningen avbröts?)"]);
 	});
 });

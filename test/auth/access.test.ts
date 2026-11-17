@@ -68,7 +68,7 @@ function req(token?: string, url = "https://fornsok.example.com/mcp", headers: R
 function makeEnv(initial: TestKey[]) {
 	let keys = initial;
 	let t = T0;
-	const fetchMock = vi.fn(async (_url: string) => new Response(JSON.stringify({ keys: keys.map((k) => k.jwk) })));
+	const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ keys: keys.map((k) => k.jwk) })));
 	const cache = createKeyCache(TEAM);
 	const deps = { fetch: fetchMock, now: () => t, cache };
 	return {

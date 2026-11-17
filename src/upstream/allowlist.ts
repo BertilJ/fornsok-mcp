@@ -39,7 +39,6 @@ const FILE_ID_SEGMENT = "(?:[A-Za-z0-9]|%2[bB]|%3[dD]){1,200}";
 const IMAGE_FILE_SEGMENT = "(?:[A-Za-z0-9._~\\-]|%(?!2[fF]|5[cC]|00|25)[0-9A-Fa-f]{2}){1,300}\\.(?:[jJ][pP][eE]?[gG]|[pP][nN][gG])";
 const ANY = /^[\s\S]{0,4000}$/;
 const INT = /^\d{1,6}$/;
-
 export const ALLOWED_CALLS: readonly AllowedCall[] = [
 	// K-samsök: sökning (SPEC 3, 4)
 	{
@@ -125,6 +124,41 @@ export const ALLOWED_CALLS: readonly AllowedCall[] = [
 		method: "GET",
 		origin: "https://app.raa.se",
 		path: /^\/open\/fornsok\/api\/uppdrag\/domaner$/,
+	},
+	// RAÄ:s ändringsflöde för lämningar (nattsynken, src/sync/). Bara listningen
+	// med datumintervall och sidindelning; inget annat under /datauttag.
+	{
+		id: "raa.datauttag.lamningar",
+		source: "raa_datauttag",
+		method: "GET",
+		origin: "https://pub.raa.se",
+		path: /^\/datauttag\/lamningar$/,
+		query: {
+			from: /^\d{4}-\d{2}-\d{2}$/,
+			to: /^\d{4}-\d{2}-\d{2}$/,
+			page: /^\d{1,4}$/,
+			size: /^\d{1,5}$/,
+		},
+		requiredQuery: ["from", "to"],
+	},
+	// OpenStreetMap Nominatim, fritextsökning begränsad till Sverige (hitta_plats).
+	// Användningsvillkoren (högst 1 anrop/s, cache) hålls av src/tools/hitta_plats.ts.
+	{
+		id: "nominatim.search",
+		source: "nominatim",
+		method: "GET",
+		origin: "https://nominatim.openstreetmap.org",
+		path: /^\/search$/,
+		query: {
+			// oxlint-disable-next-line no-control-regex -- styrtecken avvisas avsiktligt
+			q: /^[^\u0000-\u001f\u007f]{1,200}$/,
+			countrycodes: /^se$/,
+			format: /^jsonv2$/,
+			limit: /^(?:[1-9]|10)$/,
+			addressdetails: /^[01]$/,
+			"accept-language": /^sv$/,
+		},
+		requiredQuery: ["q", "countrycodes", "format"],
 	},
 ];
 

@@ -12,12 +12,14 @@ export class ToolInputError extends Error {
 	}
 }
 
-export type SourceId = "ksamsok" | "ogc" | "fornsokapp";
+export type SourceId = "ksamsok" | "ogc" | "fornsokapp" | "raa_datauttag" | "nominatim";
 
 export const SOURCE_NAMES: Record<SourceId, string> = {
 	ksamsok: "K-samsök",
 	ogc: "RAÄ:s OGC API Features",
 	fornsokapp: "Fornsök-appens läs-API",
+	raa_datauttag: "RAÄ:s ändringsflöde (datauttag)",
+	nominatim: "OpenStreetMap Nominatim",
 };
 
 /** Uppströmskällan svarade fel, svarade inte i tid, eller gick inte att tolka. */

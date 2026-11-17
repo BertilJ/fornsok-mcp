@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { LAN, normalizeName } from "../lookup/names";
 import { READ_ONLY, type ToolDeps, ok, runTool } from "./common";
+import { viaIndex } from "./via_index";
 
 const LISTOR = ["lamningstyper", "kategorier", "bedomningar", "egenskapstyper", "kommuner", "socknar", "landskap", "lan"] as const;
 const MAX_ROWS = 200;
@@ -20,6 +21,10 @@ const varde = z.object({
 	lan: z.array(z.string()).optional(),
 	kommuner: z.array(z.string()).optional(),
 	fullstandigt_namn: z.string().optional(),
+	/** Egenskapstyp (lista=egenskapstyper; namn är då värdet). */
+	typ: z.string().optional(),
+	/** Antal lämningar med värdet (lista=egenskapstyper). */
+	antal: z.number().int().optional(),
 });
 
 export const uppslagOutput = z.object({
@@ -41,7 +46,7 @@ export function registerUppslag(server: McpServer, deps: ToolDeps): void {
 		{
 			title: "Värdelistor",
 			description:
-				"Värdelistor i Kulturmiljöregistret: lämningstyper (med kategori), kategorier, antikvariska bedömningar, kommuner, socknar (med län och kommuner), landskap och län. " +
+				"Värdelistor i Kulturmiljöregistret: lämningstyper (med kategori), kategorier, antikvariska bedömningar, egenskapstyper med värden (ur serverns index, med antal lämningar), kommuner, socknar (med län och kommuner), landskap och län. " +
 				"Använd för att hitta exakta namn till filtren i sok_lamningar och lamningar_nara. `sok` filtrerar på delsträng; högst 200 rader visas.",
 			inputSchema: uppslagInput,
 			outputSchema: uppslagOutput,
@@ -60,9 +65,18 @@ export async function uppslag(args: UppslagArgs, deps: ToolDeps) {
 		kalla = "Fast tabell i servern";
 		varden = LAN.map((l) => ({ namn: l.namn, kod: l.kod, fullstandigt_namn: l.fullt }));
 	} else if (args.lista === "egenskapstyper") {
-		kalla = "–";
-		anmarkning =
-			"Egenskapstyper finns inte i Fornsök-appens värdelistor; listan kommer med det egna indexet. Egenskaper syns per lämning via verktyget lamning.";
+		// Finns inte i Fornsök-appens värdelistor; bara indexet har dem (ur GeoPackage-filen).
+		await viaIndex(
+			deps,
+			async (ix) => {
+				kalla = `Lämningsindex (D1); ${ix.hamtad_fran}`;
+				varden = (await deps.index!.egenskaper()).map((e) => ({ namn: e.varde, typ: e.typ, antal: e.antal }));
+			},
+			async (orsak) => {
+				kalla = "–";
+				anmarkning = `Egenskapstyper finns bara i serverns eget lämningsindex, som inte är tillgängligt just nu (${orsak}). Egenskaper syns per lämning via verktyget lamning.`;
+			},
+		);
 	} else {
 		const d = await deps.domains.get();
 		switch (args.lista) {
@@ -93,9 +107,14 @@ export async function uppslag(args: UppslagArgs, deps: ToolDeps) {
 
 	if (args.sok) {
 		const q = normalizeName(args.sok);
-		varden = varden.filter((v) => normalizeName(v.namn).includes(q) || (v.fullstandigt_namn && normalizeName(v.fullstandigt_namn).includes(q)));
+		varden = varden.filter(
+			(v) =>
+				normalizeName(v.namn).includes(q) ||
+				(v.fullstandigt_namn && normalizeName(v.fullstandigt_namn).includes(q)) ||
+				(v.typ && normalizeName(v.typ).includes(q)),
+		);
 	}
-	varden.sort((a, b) => a.namn.localeCompare(b.namn, "sv"));
+	varden.sort((a, b) => (a.typ ?? "").localeCompare(b.typ ?? "", "sv") || a.namn.localeCompare(b.namn, "sv"));
 	const totalt = varden.length;
 	const shown = varden.slice(0, MAX_ROWS);
 	if (totalt > MAX_ROWS) anmarkning = `Visar ${MAX_ROWS} av ${totalt}. Avgränsa med sok.`;
@@ -112,7 +131,8 @@ export async function uppslag(args: UppslagArgs, deps: ToolDeps) {
 			v.aktiv === false ? "inaktiv" : null,
 			v.beskrivning ?? null,
 		].filter(Boolean);
-		lines.push(`- ${v.namn}${extra.length ? ` (${extra.join("; ")})` : ""}`);
+		if (v.typ !== undefined) extra.unshift(`${v.antal ?? 0} lämningar`);
+		lines.push(`- ${v.typ !== undefined ? `${v.typ}: ` : ""}${v.namn}${extra.length ? ` (${extra.join("; ")})` : ""}`);
 	}
 	if (anmarkning) lines.push(`Obs: ${anmarkning}`);
 	return ok(lines.join("\n"), structured);

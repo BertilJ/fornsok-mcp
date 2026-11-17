@@ -1,8 +1,10 @@
 import { createMcpHandler } from "agents/mcp/server";
 import { verifyAccessRequest } from "./auth/access";
 import { checkRateLimit } from "./auth/ratelimit";
-import { createLiveDeps } from "./deps";
+import { createDeps } from "./deps";
 import { type WorkerEnv, accessConfig } from "./env";
+import { runScheduled } from "./scheduled";
+import { createSemanticSearch } from "./semantic";
 import { createServer } from "./server";
 import type { ToolDeps } from "./tools/common";
 
@@ -19,7 +21,14 @@ let shared: { deps: ToolDeps; handler: ReturnType<typeof createMcpHandler> } | n
 
 function getShared(env: WorkerEnv) {
 	if (!shared) {
-		const deps = createLiveDeps({ contactUrl: env.CONTACT_URL, kv: env.CACHE });
+		const deps = createDeps({
+			contactUrl: env.CONTACT_URL,
+			kv: env.CACHE,
+			db: env.DB,
+			// null utan AI eller VECTORIZE: då bara ordsök.
+			semantic: createSemanticSearch(env) ?? undefined,
+			nominatim: env.NOMINATIM,
+		});
 		const handler = createMcpHandler(() => createServer(deps), { route: MCP_ROUTE });
 		shared = { deps, handler };
 	}
@@ -43,5 +52,18 @@ export default {
 			return new Response("Not found", { status: 404 });
 		}
 		return getShared(env).handler(request, env, ctx);
+	},
+
+	/**
+	 * Schemalagda körningar (nattsynk, inbäddning), se scheduled.ts. Ingen
+	 * HTTP-förfrågan och därmed ingen Access-kontroll; Cron Triggers kan bara
+	 * startas av Cloudflare.
+	 */
+	async scheduled(controller: ScheduledController, env: WorkerEnv, ctx: ExecutionContext): Promise<void> {
+		ctx.waitUntil(
+			runScheduled(controller.cron, env).catch((err) => {
+				console.error(`schemalagd körning ${controller.cron}: oväntat fel:`, err);
+			}),
+		);
 	},
 } satisfies ExportedHandler<WorkerEnv>;

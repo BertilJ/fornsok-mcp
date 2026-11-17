@@ -37,9 +37,9 @@ describe("MCP-servern med inspelade svar", () => {
 		await client?.close();
 	});
 
-	it("listar sex verktyg i fast ordning med scheman och annotationer", async () => {
+	it("listar åtta verktyg i fast ordning med scheman och annotationer", async () => {
 		const { tools } = await client.listTools();
-		expect(tools.map((t) => t.name)).toEqual(["sok_lamningar", "lamningar_nara", "lamning", "lamning_dokument", "hamta_dokument", "uppslag"]);
+		expect(tools.map((t) => t.name)).toEqual(["sok_lamningar", "lamningar_nara", "lamning", "lamning_dokument", "hamta_dokument", "statistik", "uppslag", "hitta_plats"]);
 		for (const t of tools) {
 			expect(t.description).toBeTruthy();
 			expect(t.outputSchema).toBeTruthy();
@@ -79,11 +79,15 @@ describe("MCP-servern med inspelade svar", () => {
 	});
 
 	it("sok_lamningar: parametrar som kräver indexet ger tydligt fel", async () => {
-		for (const args of [{ fraga: "offer", lage: "betydelse" }, { fraga: "x", egenskap: [{ typ: "Material", varde: "Koppar" }] }]) {
-			const r = await client.callTool({ name: "sok_lamningar", arguments: args });
-			expect(r.isError).toBe(true);
-			expect((r.content as Array<{ text: string }>)[0].text).toMatch(/finns inte än/);
-		}
+		const sem = await client.callTool({ name: "sok_lamningar", arguments: { fraga: "offer", lage: "betydelse" } });
+		expect(sem.isError).toBe(true);
+		expect((sem.content as Array<{ text: string }>)[0].text).toMatch(/Semantisk sökning kräver serverns eget lämningsindex, som inte är tillgängligt just nu/);
+		const eg = await client.callTool({ name: "sok_lamningar", arguments: { fraga: "x", egenskap: [{ typ: "Material", varde: "Koppar" }] } });
+		expect(eg.isError).toBe(true);
+		expect((eg.content as Array<{ text: string }>)[0].text).toMatch(/kräver serverns eget lämningsindex, som inte är tillgängligt just nu \(indexet är inte inkopplat\)/);
+		const st = await client.callTool({ name: "statistik", arguments: { gruppera_pa: ["typ"], kommun: ["Falun"] } });
+		expect(st.isError).toBe(true);
+		expect((st.content as Array<{ text: string }>)[0].text).toMatch(/statistik kräver serverns eget lämningsindex/);
 		expect(calls.filter((c) => c.url.hostname === "kulturarvsdata.se")).toHaveLength(0);
 	});
 
@@ -166,7 +170,9 @@ describe("MCP-servern med inspelade svar", () => {
 		expect(c.dokument[0].dokument_ref).toMatch(/^dok1_/);
 		expect(c.dokument[1]).toMatchObject({ grupp: "handelselogg", filtyp: "pdf", visas_som_bild: false });
 		expect(b.dokument).toHaveLength(5);
-		expect(s.anmarkningar).toEqual([]);
+		// Utan D1-bindning: reservläge, märkt.
+		expect(s.reservlage).toBe(true);
+		expect(s.anmarkningar).toEqual(["Reservläge: indexet är inte inkopplat. Posterna hämtades från RAÄ:s levande källor."]);
 		// Ett nummeruppslag mot K-samsök för de två numren, tre poster från appen, inga JSON-LD-anrop.
 		expect(calls.filter((x) => x.url.pathname === "/ksamsok/api")).toHaveLength(1);
 		expect(calls.filter((x) => x.url.pathname.startsWith("/raa/lamning/"))).toHaveLength(0);
@@ -211,7 +217,7 @@ describe("MCP-servern med inspelade svar", () => {
 		const lan = await client.callTool({ name: "uppslag", arguments: { lista: "lan" } });
 		expect((lan.structuredContent as Structured).totalt).toBe(21);
 		const eg = await client.callTool({ name: "uppslag", arguments: { lista: "egenskapstyper" } });
-		expect((eg.structuredContent as Structured).anmarkning).toMatch(/kommer med det egna indexet/);
+		expect((eg.structuredContent as Structured).anmarkning).toMatch(/finns bara i serverns eget lämningsindex, som inte är tillgängligt just nu/);
 	});
 });
 

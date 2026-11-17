@@ -336,7 +336,7 @@ describe("testluckor: sok_lamningar sida > 1", () => {
 		}
 		const s = r.structuredContent as Structured;
 		expect(s.sida).toBe(3);
-		expect((r.content as Array<{ text: string }>)[0].text).toMatch(/visar 11–15 \(sida 3\)/);
+		expect((r.content as Array<{ text: string }>)[0].text).toMatch(/visar 11–15 \(sida 3,/);
 	});
 });
 

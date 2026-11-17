@@ -1,0 +1,579 @@
+{
+ "content": [
+  {
+   "antikvariskBedomning": {
+    "id": 5,
+    "namn": "Ingen antikvarisk bedömning"
+   },
+   "centrumpunkt": {
+    "type": "FeatureCollection",
+    "crs": {
+     "type": "name",
+     "properties": {
+      "name": "urn:ogc:def:crs:EPSG::3006"
+     }
+    },
+    "features": [
+     {
+      "type": "Feature",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        812740,
+        7387865
+       ]
+      },
+      "properties": {}
+     }
+    ]
+   },
+   "geometri": {
+    "type": "FeatureCollection",
+    "crs": {
+     "type": "name",
+     "properties": {
+      "name": "urn:ogc:def:crs:EPSG::3006"
+     }
+    },
+    "features": [
+     {
+      "type": "Feature",
+      "id": "L2026:6486-1",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        812740,
+        7387865
+       ]
+      },
+      "properties": {}
+     }
+    ]
+   },
+   "id": "001db954-ddfd-4cd4-8b2e-74016d2d4852",
+   "lamningsnummer": "L2026:6486",
+   "lamningstyp": {
+    "id": 1096,
+    "namn": "Rengärda"
+   },
+   "lan": [
+    {
+     "id": "25",
+     "namn": "Norrbotten"
+    }
+   ],
+   "matmetod": {
+    "id": 1,
+    "namn": "GPS"
+   },
+   "medelfel": "7.0000",
+   "oforandratLage": true,
+   "placering": {
+    "id": 1,
+    "namn": "Synlig ovan mark"
+   },
+   "publiceringsdatum": "2026-11-10T11:39:55.332744+01:00",
+   "registreringsunderlag": {
+    "id": 100,
+    "namn": "Digitalt ortofoto",
+    "kvalitettyp": {
+     "id": 201,
+     "namn": "Upplösning 0.5 m"
+    }
+   },
+   "ruin": false,
+   "uppdateringstyp": [
+    "NY"
+   ],
+   "url": "https://pub.raa.se/visa/objekt/lamning/001db954-ddfd-4cd4-8b2e-74016d2d4852",
+   "version": 1037187
+  },
+  {
+   "antikvariskBedomning": {
+    "id": 5,
+    "namn": "Ingen antikvarisk bedömning"
+   },
+   "centrumpunkt": {
+    "type": "FeatureCollection",
+    "crs": {
+     "type": "name",
+     "properties": {
+      "name": "urn:ogc:def:crs:EPSG::3006"
+     }
+    },
+    "features": [
+     {
+      "type": "Feature",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        798818,
+        7399424
+       ]
+      },
+      "properties": {}
+     }
+    ]
+   },
+   "geometri": {
+    "type": "FeatureCollection",
+    "crs": {
+     "type": "name",
+     "properties": {
+      "name": "urn:ogc:def:crs:EPSG::3006"
+     }
+    },
+    "features": [
+     {
+      "type": "Feature",
+      "id": "L2026:6481-1",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        798818,
+        7399424
+       ]
+      },
+      "properties": {}
+     }
+    ]
+   },
+   "id": "0272c064-2fcc-41e4-9355-e58f6fe26250",
+   "lamningsnummer": "L2026:6481",
+   "lamningstyp": {
+    "id": 1065,
+    "namn": "Härd"
+   },
+   "lan": [
+    {
+     "id": "25",
+     "namn": "Norrbotten"
+    }
+   ],
+   "matmetod": {
+    "id": 1,
+    "namn": "GPS"
+   },
+   "medelfel": "7.0000",
+   "oforandratLage": true,
+   "placering": {
+    "id": 1,
+    "namn": "Synlig ovan mark"
+   },
+   "publiceringsdatum": "2026-11-10T11:38:49.584723+01:00",
+   "registreringsunderlag": {
+    "id": 100,
+    "namn": "Digitalt ortofoto",
+    "kvalitettyp": {
+     "id": 201,
+     "namn": "Upplösning 0.5 m"
+    }
+   },
+   "ruin": false,
+   "uppdateringstyp": [
+    "NY"
+   ],
+   "url": "https://pub.raa.se/visa/objekt/lamning/0272c064-2fcc-41e4-9355-e58f6fe26250",
+   "version": 1037186
+  },
+  {
+   "antikvariskBedomning": {
+    "id": 5,
+    "namn": "Ingen antikvarisk bedömning"
+   },
+   "centrumpunkt": {
+    "type": "FeatureCollection",
+    "crs": {
+     "type": "name",
+     "properties": {
+      "name": "urn:ogc:def:crs:EPSG::3006"
+     }
+    },
+    "features": [
+     {
+      "type": "Feature",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        799679,
+        7381810
+       ]
+      },
+      "properties": {}
+     }
+    ]
+   },
+   "geometri": {
+    "type": "FeatureCollection",
+    "crs": {
+     "type": "name",
+     "properties": {
+      "name": "urn:ogc:def:crs:EPSG::3006"
+     }
+    },
+    "features": [
+     {
+      "type": "Feature",
+      "id": "L2026:6448-1",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        799679,
+        7381810
+       ]
+      },
+      "properties": {}
+     }
+    ]
+   },
+   "id": "031e4cab-a1e6-44cb-8bca-ecfadff37eea",
+   "lamningsnummer": "L2026:6448",
+   "lamningstyp": {
+    "id": 1065,
+    "namn": "Härd",
+    "undertyp": [
+     {
+      "id": 249,
+      "namn": "Härd med stenskoning"
+     }
+    ]
+   },
+   "lan": [
+    {
+     "id": "25",
+     "namn": "Norrbotten"
+    }
+   ],
+   "matmetod": {
+    "id": 1,
+    "namn": "GPS"
+   },
+   "medelfel": "7.0000",
+   "oforandratLage": true,
+   "placering": {
+    "id": 1,
+    "namn": "Synlig ovan mark"
+   },
+   "publiceringsdatum": "2026-11-10T11:16:02.453377+01:00",
+   "registreringsunderlag": {
+    "id": 100,
+    "namn": "Digitalt ortofoto",
+    "kvalitettyp": {
+     "id": 201,
+     "namn": "Upplösning 0.5 m"
+    }
+   },
+   "ruin": false,
+   "uppdateringstyp": [
+    "NY"
+   ],
+   "url": "https://pub.raa.se/visa/objekt/lamning/031e4cab-a1e6-44cb-8bca-ecfadff37eea",
+   "version": 1037178
+  },
+  {
+   "antikvariskBedomning": {
+    "id": 1,
+    "namn": "Fornlämning"
+   },
+   "centrumpunkt": {
+    "type": "FeatureCollection",
+    "crs": {
+     "type": "name",
+     "properties": {
+      "name": "urn:ogc:def:crs:EPSG::3006"
+     }
+    },
+    "features": [
+     {
+      "type": "Feature",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        575884.8232,
+        6481630.5826
+       ]
+      },
+      "properties": {}
+     }
+    ]
+   },
+   "geometri": {
+    "type": "FeatureCollection",
+    "crs": {
+     "type": "name",
+     "properties": {
+      "name": "urn:ogc:def:crs:EPSG::3006"
+     }
+    },
+    "features": [
+     {
+      "type": "Feature",
+      "id": "L2012:4459-3",
+      "geometry": {
+       "type": "Polygon",
+       "coordinates": [
+        [
+         [
+          575875.652,
+          6481632.117
+         ],
+         [
+          575873.71,
+          6481637.91
+         ],
+         [
+          575873.595,
+          6481639.01
+         ],
+         [
+          575873.236,
+          6481640.578
+         ],
+         [
+          575873.717,
+          6481645.63
+         ],
+         [
+          575875.401,
+          6481652.366
+         ],
+         [
+          575877.566,
+          6481656.816
+         ],
+         [
+          575880.814,
+          6481660.425
+         ],
+         [
+          575886.227,
+          6481663.552
+         ],
+         [
+          575900.805,
+          6481642.894
+         ],
+         [
+          575896.522,
+          6481636.897
+         ],
+         [
+          575894.544,
+          6481631.42
+         ],
+         [
+          575893.648,
+          6481626.611
+         ],
+         [
+          575893.241,
+          6481622.327
+         ],
+         [
+          575892.844,
+          6481617.366
+         ],
+         [
+          575892.58,
+          6481616.043
+         ],
+         [
+          575891.588,
+          6481614.654
+         ],
+         [
+          575890,
+          6481613.133
+         ],
+         [
+          575888.479,
+          6481612.868
+         ],
+         [
+          575886.825,
+          6481612.736
+         ],
+         [
+          575885.436,
+          6481612.935
+         ],
+         [
+          575883.782,
+          6481613.993
+         ],
+         [
+          575882.79,
+          6481615.117
+         ],
+         [
+          575880.938,
+          6481618.16
+         ],
+         [
+          575876.639,
+          6481629.008
+         ],
+         [
+          575875.652,
+          6481632.117
+         ]
+        ]
+       ]
+      },
+      "properties": {}
+     }
+    ]
+   },
+   "id": "047a7770-cdf6-4c4d-84ea-00b62be52050",
+   "lamningsnummer": "L2012:4459",
+   "lamningstyp": {
+    "id": 106,
+    "namn": "Gravfält"
+   },
+   "lan": [
+    {
+     "id": "05",
+     "namn": "Östergötland"
+    }
+   ],
+   "matmetod": {
+    "id": 5,
+    "namn": "Manuell inprickning"
+   },
+   "medelfel": "10.0000",
+   "oforandratLage": true,
+   "placering": {
+    "id": 1,
+    "namn": "Synlig ovan mark"
+   },
+   "publiceringsdatum": "2026-11-10T11:01:17.270858+01:00",
+   "registreringsunderlag": {
+    "id": 104,
+    "namn": "Annat underlag",
+    "kvalitettyp": {
+     "id": 212,
+     "namn": "Skärmdigitaliserad utifrån vektordata"
+    }
+   },
+   "ruin": false,
+   "uppdateringstyp": [
+    "UPPDATERAD_GEOMETRI"
+   ],
+   "url": "https://pub.raa.se/visa/objekt/lamning/047a7770-cdf6-4c4d-84ea-00b62be52050",
+   "version": 1037170
+  },
+  {
+   "antikvariskBedomning": {
+    "id": 1,
+    "namn": "Fornlämning"
+   },
+   "centrumpunkt": {
+    "type": "FeatureCollection",
+    "crs": {
+     "type": "name",
+     "properties": {
+      "name": "urn:ogc:def:crs:EPSG::3006"
+     }
+    },
+    "features": [
+     {
+      "type": "Feature",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        595271.57,
+        6609376.423
+       ]
+      },
+      "properties": {}
+     }
+    ]
+   },
+   "geometri": {
+    "type": "FeatureCollection",
+    "crs": {
+     "type": "name",
+     "properties": {
+      "name": "urn:ogc:def:crs:EPSG::3006"
+     }
+    },
+    "features": [
+     {
+      "type": "Feature",
+      "id": "L2004:9422-1",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        595271.57,
+        6609376.423
+       ]
+      },
+      "properties": {}
+     }
+    ]
+   },
+   "id": "1117fbb2-df8a-4299-b693-ae4484f58393",
+   "lamningsnummer": "L2004:9422",
+   "lamningstyp": {
+    "id": 1121,
+    "namn": "Stensättning"
+   },
+   "lan": [
+    {
+     "id": "19",
+     "namn": "Västmanland"
+    }
+   ],
+   "matmetod": {
+    "id": 5,
+    "namn": "Manuell inprickning"
+   },
+   "medelfel": "10.0000",
+   "oforandratLage": true,
+   "placering": {
+    "id": 1,
+    "namn": "Synlig ovan mark"
+   },
+   "publiceringsdatum": "2026-11-10T11:05:35.31501+01:00",
+   "registreringsunderlag": {
+    "id": 101,
+    "namn": "Fastighetskartan/utskrivet ortofoto",
+    "kvalitettyp": {
+     "id": 204,
+     "namn": "Skala 1:10000"
+    }
+   },
+   "ruin": false,
+   "uppdateringstyp": [
+    "OVRIG_UPPDATERING"
+   ],
+   "url": "https://pub.raa.se/visa/objekt/lamning/1117fbb2-df8a-4299-b693-ae4484f58393",
+   "version": 1037011
+  }
+ ],
+ "empty": false,
+ "first": true,
+ "last": false,
+ "number": 0,
+ "numberOfElements": 5,
+ "pageable": {
+  "offset": 0,
+  "pageNumber": 0,
+  "pageSize": 5,
+  "paged": true,
+  "sort": {
+   "empty": false,
+   "sorted": true,
+   "unsorted": false
+  },
+  "unpaged": false
+ },
+ "size": 5,
+ "sort": {
+  "empty": false,
+  "sorted": true,
+  "unsorted": false
+ },
+ "totalElements": 45,
+ "totalPages": 9
+}

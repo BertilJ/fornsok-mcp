@@ -12,7 +12,7 @@
  *   (värdena ändras nästan aldrig).
  *
  * Användning:
- *   node ingest/referens.ts [--lamning-domaner fil] [--uppdrag-domaner fil] [--utan-ksamsok]
+ *   [CONTACT_URL=https://…] node ingest/referens.ts [--lamning-domaner fil] [--uppdrag-domaner fil] [--utan-ksamsok]
  *
  * Standard för domänfilerna är de inspelade svaren i test/fixtures. Utan
  * --utan-ksamsok anropas K-samsök; annars behålls socken→landskap från en
@@ -21,11 +21,16 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { userAgent } from "../src/config.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const OUT = join(HERE, "data", "referens.json");
-const USER_AGENT = "fornsok-mcp/0.1 (+https://fornsok.example.se)";
+/**
+ * Samma kontaktväg som servern (SPEC 9.1, 13): miljövariabeln CONTACT_URL,
+ * annars projektets förvar (DEFAULT_CONTACT_URL i src/config.ts).
+ */
+export const USER_AGENT = userAgent(process.env.CONTACT_URL);
 
 export interface Referens {
 	byggd: string;

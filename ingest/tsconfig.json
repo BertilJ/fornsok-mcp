@@ -1,7 +1,11 @@
 {
-	// Typkontroll av ingest/ och testerna för index och inläsning:
-	//   npx tsc -p ingest/tsconfig.json
-	// (Rotens tsconfig omfattar bara src/.)
+	// Typkontroll av ingest/ (och de filer i src/ som ingest importerar):
+	//   npm run type-check:ingest
+	// Testerna för index och inläsning kontrolleras av test/tsconfig.json.
+	// Node 22 kör ingest/ med typstrippning, som bara klarar syntax som kan
+	// strykas (inga parameteregenskaper, enum, namespace). erasableSyntaxOnly
+	// går inte att slå på här (worker-configuration.d.ts drar in hela src/);
+	// test/ingest/cli.test.ts startar i stället cli.ts med Node.
 	"extends": "../tsconfig.json",
 	"compilerOptions": {
 		"target": "es2022",
@@ -10,5 +14,5 @@
 		"allowImportingTsExtensions": true,
 		"noEmit": true
 	},
-	"include": ["./**/*.ts", "../test/store/**/*.ts", "../test/ingest/**/*.ts", "../worker-configuration.d.ts"]
+	"include": ["./**/*.ts", "../worker-configuration.d.ts"]
 }

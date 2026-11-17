@@ -3,7 +3,7 @@
  * SQLite-fil via migreringen och inläsningsflödet. Filen laddas ned separat
  * (se ingest/cli.ts); saknas den hoppar testerna över sig själva.
  */
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -24,10 +24,22 @@ export interface LoadedFalun {
 	cleanup(): void;
 }
 
+/** Migreringarna efter 0001 (0001 körs av inläsningen), i ordning – samma schema som i drift. */
+export const MIGRATIONS_DIR = resolve(__dirname, "../../migrations");
+export function laterMigrations(): string[] {
+	return readdirSync(MIGRATIONS_DIR)
+		.filter((f) => /^\d{4}_.*\.sql$/.test(f) && !f.startsWith("0001_"))
+		.sort()
+		.map((f) => readFileSync(join(MIGRATIONS_DIR, f), "utf8"));
+}
+
 export function loadFalun(): LoadedFalun {
 	const dir = mkdtempSync(join(tmpdir(), "fornsok-falun-"));
 	const path = join(dir, "falun.sqlite");
 	const result = load(FALUN_GPKG, new DbSink(path, { recreate: true }));
+	const db = new DatabaseSync(path);
+	for (const sql of laterMigrations()) db.exec(sql);
+	db.close();
 	return {
 		dir,
 		path,

@@ -36,7 +36,18 @@
 		"ACCESS_TEAM_DOMAIN": "<TEAM>.cloudflareaccess.com",
 		"ACCESS_AUD": "<AUD-TAGG FÖR ACCESS-APPLIKATIONEN>",
 		// ACCESS_DEV_BYPASS får INTE sättas här – bara i .dev.vars för lokal utveckling.
+		// Län i det semantiska omfånget (SPEC 5.2), kommaseparerat. Fler län = fler vektorer (se SPEC 9.4).
+		"SEMANTIC_LAN": "Dalarna",
+		// "NOMINATIM": "av" stänger av OpenStreetMap Nominatim i hitta_plats (då bara indexets namn).
 	},
+
+	// Schemalagda körningar (src/scheduled.ts):
+	// - "40 3-6 * * *": nattsynk via RAÄ:s ändringsflöde (flödet uppdateras 00–04), fyra
+	//   tillfällen så att en lång eller avbruten körning fortsätter. Följs av inbäddning.
+	// - "*/15 * * * *": inbäddning för den semantiska sökningen i delar (högst 1 500
+	//   lämningar per körning) tills omfånget är inbäddat; därefter bara ändrade poster.
+	// Utan DB görs ingenting; utan AI eller VECTORIZE ingen inbäddning.
+	"triggers": { "crons": ["40 3-6 * * *", "*/15 * * * *"] },
 
 	// Begränsning per användare (e-post ur Access-JWT, eller common_name för tjänstetoken).
 	// namespace_id: ett heltal (som sträng) du väljer, unikt i kontot – bindningar med
@@ -53,7 +64,8 @@
 	// Cache för värdelistor (24 h) och dokumentlistor (1 h).
 	"kv_namespaces": [{ "binding": "CACHE", "id": "<KV-NAMNRYMDENS ID>" }],
 
-	// Indexet (kommande etapper). Koden fungerar utan dessa; de kan ligga kvar.
+	// Indexet (D1) och semantisk sökning (Vectorize + Workers AI). Koden fungerar utan
+	// dem: utan DB reservläge mot levande källor, utan VECTORIZE/AI bara ordsök.
 	"d1_databases": [
 		{
 			"binding": "DB",

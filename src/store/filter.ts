@@ -3,22 +3,18 @@
  * en JSON-parameter och packas upp med json_each, så att antalet parametrar
  * håller sig långt under D1:s gräns på 100 per fråga.
  */
-import type { Bedomning, Egenskap, ResolvedSearchFilter } from "../sources/types";
+import type { Bedomning, ResolvedSearchFilter } from "../sources/types";
 import { IndexInputError } from "./d1";
 import { buildFtsQuery, type FtsQuery } from "./fts";
 import { checkedPlanar, boxAround, spatialCondition, type SqlPart, type SwerefBox, wgsBoxToSweref } from "./spatial";
 import type { Planar } from "../geo/sweref";
 
-/** Filter för indexet: källgränssnittets filter plus det indexet tillför (SPEC 6). */
-export interface IndexSearchFilter extends ResolvedSearchFilter {
-	/** Fritext; delas i ord och OCH-kopplas med `ord` (se fts.ts). */
-	fraga?: string;
-	kategori?: string[];
-	/** Samma typ: något av värdena. Olika typer: alla måste finnas. Gäller även ingående lämningars egenskaper. */
-	egenskap?: Egenskap[];
-	/** Exakt avstånd till geometrin räknas i koden; SQL väljer kandidater med rutan. */
-	nara?: { lat: number; lon: number; radie_m: number };
-}
+/**
+ * Filter för indexet. Sedan etapp 4 är det samma som källgränssnittets filter
+ * (fraga, kategori, egenskap och nara ligger där); namnet finns kvar för
+ * befintliga anropare.
+ */
+export type IndexSearchFilter = ResolvedSearchFilter;
 
 export const MAX_LIST = 50;
 export const MAX_VALUE_LENGTH = 300;
@@ -123,10 +119,16 @@ export function buildFilter(f: IndexSearchFilter): BuiltFilter {
 			if (!t || !v || t.length > MAX_VALUE_LENGTH || v.length > MAX_VALUE_LENGTH) continue;
 			byTyp.set(t, [...(byTyp.get(t) ?? []), v]);
 		}
-		for (const [t, v] of byTyp)
+		// Alla typer i en JSON-parameter (granskningen, punkt 3): antalet parametrar
+		// växer inte med antalet typer. En lämning ska ha minst ett av värdena för
+		// varje typ, därför räknas antalet olika typer som träffar.
+		if (byTyp.size)
 			c.push({
-				sql: "l.id IN (SELECT lamning_id FROM egenskap WHERE typ = ? AND varde IN (SELECT value FROM json_each(?)))",
-				params: [t, json(v)],
+				sql: `l.id IN (SELECT e.lamning_id FROM json_each(?) j
+					JOIN egenskap e ON e.typ = json_extract(j.value, '$.typ')
+						AND e.varde IN (SELECT value FROM json_each(j.value, '$.varden'))
+					GROUP BY e.lamning_id HAVING count(DISTINCT e.typ) = ?)`,
+				params: [json([...byTyp].map(([typ, varden]) => ({ typ, varden: [...new Set(varden)] }))), byTyp.size],
 			});
 	}
 

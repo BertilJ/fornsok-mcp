@@ -7,6 +7,16 @@
  *   node scripts/smoke.mjs [http://localhost:8787/mcp]
  *       Lokalt med utvecklingsläget på (ACCESS_DEV_BYPASS="true" i .dev.vars).
  *
+ *   node scripts/smoke.mjs --index [url]
+ *       Som ovan, mot en server med lokalt index (D1-bindningen DB, laddad med
+ *       minst Falu kommun). Kontrollerar dessutom att sökning, närhet och post
+ *       kommer ur indexet (hamtad_fran "index …", inget reservläge), egenskaps-
+ *       filter och statistik. Utan --index förväntas reservläge.
+ *
+ *   node scripts/smoke.mjs --index --semantisk [url]
+ *       Dessutom den semantiska kanalen (kräver AI och VECTORIZE, och att
+ *       Dalarnas län är inbäddat) – alltså en driftsatt server.
+ *
  *   node scripts/smoke.mjs --utan-inloggning [url]
  *       Kontrollerar att servern avvisar anrop utan Access-JWT med 401
  *       (för /mcp och en okänd sökväg) och att en MCP-klient inte kommer in.
@@ -19,6 +29,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 
 const args = process.argv.slice(2);
 const utanInloggning = args.includes("--utan-inloggning");
+const medIndex = args.includes("--index");
 const url = new URL(args.find((a) => !a.startsWith("--")) ?? "http://localhost:8787/mcp");
 
 let failures = 0;
@@ -75,8 +86,8 @@ out("server", { ...info, instruktioner: (client.getInstructions() ?? "").slice(0
 const { tools } = await client.listTools();
 out("tools/list", tools.map((t) => ({ name: t.name, annotations: t.annotations, har_outputSchema: !!t.outputSchema })));
 check(
-	tools.map((t) => t.name).join(",") === "sok_lamningar,lamningar_nara,lamning,lamning_dokument,hamta_dokument,uppslag",
-	"sex verktyg i fast ordning",
+	tools.map((t) => t.name).join(",") === "sok_lamningar,lamningar_nara,lamning,lamning_dokument,hamta_dokument,statistik,uppslag,hitta_plats",
+	`åtta verktyg i fast ordning (${tools.length})`,
 );
 
 async function call(name, args) {
@@ -107,6 +118,13 @@ check((p7415?.dokument ?? []).some((d) => d.grupp === "inventeringsbok" && d.vis
 check((p7415?.historik ?? []).length >= 1, "L1946:7415: versionshistorik");
 const p8802 = posts.find((p) => p.lamningsnummer === "L2000:8802");
 check(p8802?.lamningstyp === "Hyttområde" && p8802?.raa_nummer === "Stora Kopparberg 172:1", "L2000:8802: hyttområde");
+if (medIndex) {
+	check(/^index \d{4}-\d{2}-\d{2}/.test(p646?.hamtad_fran ?? "") && /^index /.test(p8802?.hamtad_fran ?? ""), `lamning: Falu-posterna ur indexet (${p646?.hamtad_fran})`);
+	check((p646?.referenser?.skriftliga_kallor ?? null) !== null, "lamning: referenser till indexposten från Fornsök-appen");
+	check(l.structuredContent?.reservlage === false, "lamning: inte reservläge");
+} else {
+	check(l.structuredContent?.reservlage === true, "lamning: reservläge utan index");
+}
 check((p8802?.historik ?? []).some((v) => v.aktivitet?.typ === "Uppdrag"), "L2000:8802: historik med uppdrag");
 
 // lamning_dokument + hamta_dokument: inventeringsbokssidan som bild, händelseloggen som länk.
@@ -132,6 +150,18 @@ check(forfalskad.isError === true, "hamta_dokument: påhittad referens avvisas")
 // sok_lamningar: ordsök med filter, och kategori.
 const s = await call("sok_lamningar", { fraga: "trefaldighetskälla", kommun: ["Falun"], socken: ["Bjursås"], antal: 10 });
 check(!s.isError && (s.structuredContent?.traffar ?? []).some((t) => t.lamningsnummer === "L2001:646"), "sok_lamningar hittar L2001:646");
+check(Array.isArray(s.structuredContent?.sokkanaler) && typeof s.structuredContent?.hamtad_fran === "string", `sok_lamningar: sokkanaler och hamtad_fran (${s.structuredContent?.hamtad_fran})`);
+check(s.structuredContent?.reservlage === !medIndex, `sok_lamningar: reservlage = ${!medIndex}`);
+if (medIndex) {
+	const u = (s.structuredContent?.traffar ?? []).find((t) => t.lamningsnummer === "L2001:646")?.utdrag ?? "";
+	check(u.includes("«"), "sok_lamningar: utdrag med markerad träff ur indexet");
+	const pre = await call("sok_lamningar", { fraga: "önskekäll*", kommun: ["Falun"], antal: 5 });
+	check((pre.structuredContent?.traffar ?? []).some((t) => t.lamningsnummer === "L2001:646"), "sok_lamningar: prefixsök önskekäll*");
+	const eg = await call("sok_lamningar", { egenskap: [{ typ: "material", varde: "koppar" }], lamningstyp: ["Hyttområde"], kommun: ["Falun"], antal: 3 });
+	check(!eg.isError && eg.structuredContent?.totalt > 0, `sok_lamningar: egenskapsfilter (${eg.structuredContent?.totalt} träffar)`);
+	const nara = await call("sok_lamningar", { fraga: "hytt*", nara: { lat: 60.66159242831314, lon: 15.554018818384327, radie_m: 300 }, antal: 3 });
+	check((nara.structuredContent?.traffar ?? [])[0]?.avstand_m !== undefined, "sok_lamningar: nara med avstånd");
+}
 const k = await call("sok_lamningar", { kategori: ["Kult, offer och folktro"], socken: ["Bjursås"], antal: 10 });
 check(!k.isError && (k.structuredContent?.traffar ?? []).some((t) => t.lamningsnummer === "L2001:646"), "sok_lamningar med kategori hittar L2001:646");
 
@@ -139,14 +169,47 @@ check(!k.isError && (k.structuredContent?.traffar ?? []).some((t) => t.lamningsn
 const n = await call("lamningar_nara", { lat: 60.66159242831314, lon: 15.554018818384327, radie_m: 500, antal: 10 });
 const nl = n.structuredContent?.lamningar ?? [];
 check(!n.isError && nl[0]?.lamningsnummer === "L2000:8802" && new Set(nl.map((x) => x.lamningsnummer)).size === nl.length, "lamningar_nara: L2000:8802 först, deduplicerat");
+check(n.structuredContent?.reservlage === !medIndex, `lamningar_nara: reservlage = ${!medIndex} (${n.structuredContent?.hamtad_fran})`);
+
+// statistik: kräver indexet.
+const st = await call("statistik", { gruppera_pa: ["kategori"], kommun: ["Falun"] });
+if (medIndex) {
+	const kult = (st.structuredContent?.grupper ?? []).find((g) => g.varden[0] === "Kult, offer och folktro");
+	check(!st.isError && kult?.antal > 0, `statistik per kategori i Falun (Kult, offer och folktro: ${kult?.antal})`);
+	const eu = await call("uppslag", { lista: "egenskapstyper", sok: "Material" });
+	check(!eu.isError && (eu.structuredContent?.varden ?? []).length > 0, "uppslag egenskapstyper ur indexet");
+} else {
+	check(st.isError === true, "statistik utan index ger tydligt fel");
+}
 
 // uppslag.
 const u = await call("uppslag", { lista: "socknar", sok: "Bjursås" });
 check(!u.isError && u.structuredContent?.varden?.[0]?.namn === "Bjursås", "uppslag hittar Bjursås");
 
-// Felväg: parameter som kräver indexet.
-const e = await call("sok_lamningar", { fraga: "offerkälla", lage: "betydelse" });
-check(e.isError === true, "lage=betydelse ger tydligt fel");
+// Semantisk sökning: lokalt finns inga AI/VECTORIZE-bindningar, så "betydelse" ger tydligt fel
+// och "auto" är ordsök. Med --semantisk (driftsatt server med bindningarna) prövas kanalen.
+const medSemantik = args.includes("--semantisk");
+const e = await call("sok_lamningar", { fraga: "offerkälla", lage: "betydelse", kommun: ["Falun"] });
+if (medSemantik) {
+	check(!e.isError && JSON.stringify(e.structuredContent?.sokkanaler) === '["betydelse"]', "lage=betydelse inom omfånget ger semantiska träffar");
+	const a = await call("sok_lamningar", { fraga: "platser där man offrat", kommun: ["Falun"], antal: 5 });
+	check(JSON.stringify(a.structuredContent?.sokkanaler) === '["ord","betydelse"]', "auto inom omfånget: ord + betydelse");
+	const ut = await call("sok_lamningar", { fraga: "offerkälla", lage: "betydelse", kommun: ["Uppsala"] });
+	check(ut.isError === true && /gäller bara/.test(ut.content?.[0]?.text ?? ""), "lage=betydelse utanför omfånget ger fel som förklarar var den gäller");
+	const riks = await call("sok_lamningar", { fraga: "offerkälla", antal: 3 });
+	check(JSON.stringify(riks.structuredContent?.sokkanaler) === '["ord"]', "auto utan geografiskt filter: bara ordsök");
+} else {
+	check(e.isError === true, "lage=betydelse ger tydligt fel utan semantisk kanal");
+	const a = await call("sok_lamningar", { fraga: "offerkälla", kommun: ["Falun"], antal: 3 });
+	check(JSON.stringify(a.structuredContent?.sokkanaler) === '["ord"]', "auto utan semantisk kanal: bara ordsök");
+}
+
+// hitta_plats: en socken i indexet. Bara med index, så att röktestet inte anropar Nominatim.
+if (medIndex) {
+	const hp = await call("hitta_plats", { namn: "Bjursås" });
+	const kand = hp.structuredContent?.kandidater ?? [];
+	check(!hp.isError && kand.length > 0 && hp.structuredContent?.kalla === "index", `hitta_plats: ${kand.length} kandidater för Bjursås ur indexet`);
+}
 
 await client.close();
 done();
