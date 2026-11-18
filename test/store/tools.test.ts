@@ -75,9 +75,9 @@ describe.skipIf(!HAS_FALUN)(`Verktygen med indexet ${HAS_FALUN ? "" : `(${SKIP_M
 		const s = r.structuredContent as S;
 		expect(s).toMatchObject({ totalt: 1, sokkanaler: ["ord"], reservlage: false, hamtad_fran: "index 2026-11-17", kalla: "Lämningsindex (D1)", nabara: 1 });
 		expect(s.traffar[0]).toMatchObject({ lamningsnummer: "L2001:646", raa_nummer: "Bjursås 27:1", kommun: ["Falun"], socken: ["Bjursås"], osakerhet_m: 15 });
-		expect(s.traffar[0].utdrag).toContain("«önskekälla»");
+		expect(s.traffar[0].utdrag).toContain("⟦önskekälla⟧");
 		expect(c.calls.filter((x) => x.url.hostname === "kulturarvsdata.se")).toHaveLength(0);
-		expect(text(r)).toMatch(/sökträffar inom «»/);
+		expect(text(r)).toMatch(/sökträffar inom ⟦⟧\): «[^«»]*⟦önskekälla⟧[^«»]*»/);
 	});
 
 	it("sok_lamningar: prefix, kategori, egenskap (skiftlägesokänsligt) och nara med exakt avstånd", async () => {

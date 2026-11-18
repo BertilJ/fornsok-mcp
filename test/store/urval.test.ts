@@ -37,7 +37,7 @@ describe("indexet mot testurvalet (300 lämningar, alltid)", () => {
 		const r = await store.searchIndex({ ord: ["trefaldighetskälla"], socken: [{ namn: "Bjursås" }] });
 		const t646 = r.traffar.find((t) => t.uuid === U646);
 		expect(t646).toBeTruthy();
-		expect(t646?.utdrag).toMatch(/«[^»]+»/);
+		expect(t646?.utdrag).toMatch(/⟦[^⟧]+⟧/);
 		const p = await store.searchIndex({ ord: ["önskekäll*"] });
 		expect(p.traffar.map((t) => t.uuid)).toContain(U646);
 		const k = await store.searchIndex({ kategori: ["Kult, offer och folktro"], socken: [{ namn: "Bjursås" }] }, { antal: 50 });
@@ -68,6 +68,18 @@ describe("indexet mot testurvalet (300 lämningar, alltid)", () => {
 		expect(s.grupper.find((g) => g.varden[0] === "Bjursås")?.antal).toBeGreaterThanOrEqual(200);
 		const t = await store.statistik(["socken", "typ"], { kommun: ["Falun"] });
 		expect(t.grupper.reduce((n, g) => n + g.antal, 0)).toBeGreaterThanOrEqual(300);
+	});
+
+	it("statistik: gränserna för två nivåer (lägre med filter på område eller egenskap), en nivå med filter utan gräns", async () => {
+		const liten = new IndexStore(d1FromSqlite(raw), { statistikTvaNivaer: 100, statistikTvaNivaerOmrade: 20 });
+		const forn = { antikvarisk_bedomning: ["Fornlämning" as const] };
+		await expect(liten.statistik(["socken", "typ"], forn)).rejects.toThrow(/105 lämningar; gruppering på två nivåer \(socken och typ\) görs för högst 100 lämningar \(.*Gruppera på en nivå/);
+		await expect(liten.statistik(["socken", "typ"], { kommun: ["Leksand"] })).resolves.toMatchObject({ totalt: 19 });
+		await expect(liten.statistik(["socken", "typ"], { kommun: ["Falun"] })).rejects.toThrow(/högst 20 lämningar med filter på område eller egenskap/);
+		await expect(liten.statistik(["socken", "typ"], { egenskap: [{ typ: "Typ", varde: "Gruvhål" }] })).resolves.toMatchObject({ totalt: 20 });
+		// En nivå: standardgränsen ligger över registrets storlek.
+		await expect(liten.statistik(["socken"], forn)).resolves.toMatchObject({ totalt: 105 });
+		await expect(liten.statistik(["kategori"], { kommun: ["Falun"] })).resolves.toMatchObject({ totalt: 300 });
 	});
 
 	it("hitta_plats: socknen ur den förberäknade sammanfattningen", async () => {

@@ -87,7 +87,26 @@ describe.skipIf(!HAS)("hela landet (lokal SQLite)", () => {
 		const r = await store.searchIndex({ ord: ["och"] });
 		expect(r.rangordnad).toBe(false);
 		expect(r.totalt).toBeGreaterThan(150_000);
-		await expect(store.statistik(["kommun", "socken"])).rejects.toThrow(/Avgränsa med län/);
+		await expect(store.statistik(["kommun", "socken"])).rejects.toThrow(/Gruppera på en nivå/);
+	});
+
+	it("statistik: en nivå med filter går för hela registret, två nivåer upp till gränsen, under cirka 2 s", async () => {
+		const forn = { antikvarisk_bedomning: ["Fornlämning" as const] };
+		const alla = { antikvarisk_bedomning: ["Fornlämning", "Möjlig fornlämning", "Övrig kulturhistorisk lämning", "Ingen antikvarisk bedömning", "Ej kulturhistorisk lämning"] as const };
+		const fall: Array<[string, () => Promise<{ totalt: number }>, number]> = [
+			["fornlämningar per län", () => store.statistik(["lan"], forn), 300_000],
+			["gravar per län", () => store.statistik(["lan"], { kategori: ["Gravar"] }), 150_000],
+			["alla per kategori", () => store.statistik(["kategori"], { antikvarisk_bedomning: [...alla.antikvarisk_bedomning] }), 760_000],
+			["fornlämningar per län och typ", () => store.statistik(["lan", "typ"], forn), 300_000],
+			["socken och kategori i Västra Götaland", () => store.statistik(["socken", "kategori"], { lan: ["Västra Götaland"] }), 100_000],
+		];
+		for (const [namn, f, minst] of fall) {
+			const t = performance.now();
+			const r = await f();
+			expect(r.totalt, namn).toBeGreaterThan(minst);
+			expect(performance.now() - t, namn).toBeLessThan(4000);
+		}
+		await expect(store.statistik(["socken", "typ"], { lan: ["Västra Götaland", "Skåne", "Kalmar", "Uppsala"] })).rejects.toThrow(/högst 200000 lämningar med filter på område/);
 	});
 
 	it("namnuppslag ur indexet: socknar, kommuner och typer för hela landet", async () => {

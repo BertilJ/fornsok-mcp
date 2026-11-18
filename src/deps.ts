@@ -59,7 +59,8 @@ export function createLiveDeps(options: LiveDepsOptions & { domainDb?: D1Like } 
 	let domains: DomainService;
 	const app = new FornsokAppSource(client, () => domains.get());
 	const appDomaner = new KvDomainSource(app, kv);
-	domains = new DomainService(domainDb ? new FallbackDomainSource(new IndexDomainSource(domainDb), appDomaner) : appDomaner);
+	// Indexets listor sparar själva en kopia av appens (via KV) när den saknas eller är gammal.
+	domains = new DomainService(domainDb ? new FallbackDomainSource(new IndexDomainSource(domainDb, { app: appDomaner }), appDomaner) : appDomaner);
 	// Namn som saknas i indexets listor (t.ex. ett index med bara en del av landet) prövas mot appens.
 	if (domainDb) domains.reserv = new DomainService(appDomaner);
 	return {

@@ -10,7 +10,8 @@ import type { ResolvedSearchFilter, SearchHit, SemanticHit } from "../sources/ty
 import { reservHamtadFran } from "../store/access";
 import { type IndexHit, MAX_RANKAD } from "../store/index";
 import { MAX_TERMS, tokenize } from "../store/fts";
-import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, citat, fmtCoord, list, ok, runTool, EXTERN_TEXT } from "./common";
+import { TRAFF_SLUT, TRAFF_START } from "../extern_text";
+import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, citat, fmtCoord, list, ok, rad, runTool, EXTERN_TEXT } from "./common";
 import { type ResolvedFilter, describeFilter, filterShape, hasCriteria, resolveEgenskaper, resolveFilter, toKsamsokFilter } from "./filter";
 import { makeUtdrag } from "./utdrag";
 import { type OpenIndex, viaIndex } from "./via_index";
@@ -86,7 +87,7 @@ export const sokOutput = z.object({
 			sweref99tm: z.object({ e: z.number(), n: z.number() }).nullable(),
 			osakerhet_m: z.number().nullable().optional(),
 			geometrityp: z.string().nullable().optional(),
-			/** Cirka 200 tecken ur registrets text; i indexet med sökträffarna inom «». */
+			/** Cirka 200 tecken ur registrets text; i indexet med sökträffarna inom ⟦⟧. */
 			utdrag: z.string().optional(),
 			avstand_m: z.number().optional(),
 			vaderstreck: z.string().nullable().optional(),
@@ -529,17 +530,21 @@ function respond(args: SokArgs, s: Svar) {
 			`${s.totalt_ungefar ? "Cirka " : ""}${s.totalt} träffar${traffar.length ? `, visar ${sidStart}–${sidStart + traffar.length - 1}` : ""} (sida ${args.sida}, ${kanaler}). Källa: ${s.kalla}; ${s.hamtad_fran}.`,
 		);
 		traffar.forEach((t, i) => {
-			const id = [t.lamningsnummer, t.raa_nummer ? `(${t.raa_nummer})` : null].filter(Boolean).join(" ");
-			const plats = list([list(t.kommun), list(t.socken)]);
+			const id = [rad(t.lamningsnummer), t.raa_nummer ? `(${rad(t.raa_nummer)})` : null].filter(Boolean).join(" ");
+			const plats = list([list(t.kommun.map(rad)), list(t.socken.map(rad))]);
 			const dist = t.avstand_m !== undefined ? `, ${t.avstand_m} m bort${t.vaderstreck ? ` åt ${t.vaderstreck}` : ""}` : "";
 			const namn = t.namn ? ` ${citat(t.namn)}` : "";
 			const via = t.kanaler && s.sokkanaler.length > 1 ? ` [${t.kanaler.join("+")}]` : "";
 			lines.push(
-				`${sidStart + i}. ${id}${namn} – ${t.lamningstyp ?? "okänd typ"}, ${t.antikvarisk_bedomning ?? "bedömning saknas"}. ${plats}. ${fmtCoord(t.koordinat?.lat, t.koordinat?.lon)}${dist}. ${t.url}${via}`,
+				`${sidStart + i}. ${id}${namn} – ${rad(t.lamningstyp) || "okänd typ"}, ${rad(t.antikvarisk_bedomning) || "bedömning saknas"}. ${plats}. ${fmtCoord(t.koordinat?.lat, t.koordinat?.lon)}${dist}. ${t.url}${via}`,
 			);
-			// Utdraget är redan rensat (rad i common.ts / chooseUtdrag i store): «» i registertexten
-			// är utbytta mot ‹›, så de enda «» är sökträffarnas markeringar.
-			if (t.utdrag) lines.push(t.utdrag.includes("«") ? `   Källtext (registret; sökträffar inom «»): ${t.utdrag}` : `   Källtext (registret): «${t.utdrag}»`);
+			// Utdraget är redan rensat (rad i common.ts / chooseUtdrag i store): «» och ⟦⟧ i
+			// registertexten är utbytta, så det enda «» är avgränsningen och de enda ⟦⟧ är
+			// sökträffarnas markeringar. Rensas ändå här (utdrag från andra vägar).
+			if (t.utdrag) {
+				const u = t.utdrag.replace(/«/g, "‹").replace(/»/g, "›");
+				lines.push(`   Källtext (registret${u.includes(TRAFF_START) ? `; sökträffar inom ${TRAFF_START}${TRAFF_SLUT}` : ""}): «${u}»`);
+			}
 		});
 	}
 	for (const a of anmarkningar) lines.push(`Obs: ${a}`);

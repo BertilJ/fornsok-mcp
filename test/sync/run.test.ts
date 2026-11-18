@@ -522,6 +522,124 @@ describe("runSync", () => {
 	});
 });
 
+/**
+ * Områdestabellerna räknade direkt i JS ur lamning, lamning_omrade och omrade
+ * (oberoende av SQL:en i src/store/omraden.ts), jämförda med tabellerna.
+ */
+function kontrolleraOmraden(db: DatabaseSync): void {
+	const lam = new Map((db.prepare("SELECT id, lat, lon FROM lamning").all() as Array<{ id: number; lat: number | null; lon: number | null }>).map((r) => [r.id, r]));
+	const omr = new Map((db.prepare("SELECT id, niva FROM omrade").all() as Array<{ id: number; niva: string }>).map((r) => [r.id, r.niva]));
+	const lo = db.prepare("SELECT omrade_id, lamning_id FROM lamning_omrade").all() as Array<{ omrade_id: number; lamning_id: number }>;
+	const perOmrade = new Map<number, number[]>();
+	const perLamning = new Map<number, number[]>();
+	for (const r of lo) {
+		perOmrade.set(r.omrade_id, [...(perOmrade.get(r.omrade_id) ?? []), r.lamning_id]);
+		perLamning.set(r.lamning_id, [...(perLamning.get(r.lamning_id) ?? []), r.omrade_id]);
+	}
+	const sam = new Map((db.prepare("SELECT * FROM omrade_sammanfattning").all() as Array<Record<string, number | null>>).map((r) => [Number(r.omrade_id), r]));
+	for (const [id] of omr) {
+		const ids = perOmrade.get(id) ?? [];
+		const lagen = ids.map((i) => lam.get(i)).filter((l) => l && l.lat !== null && l.lon !== null) as Array<{ lat: number; lon: number }>;
+		const r = sam.get(id);
+		expect(r?.inaktuell ?? 0, `omrade ${id} inaktuell`).toBe(0);
+		expect(Number(r?.antal ?? 0), `omrade ${id} antal`).toBe(ids.length);
+		expect(Number(r?.med_lage ?? 0), `omrade ${id} med_lage`).toBe(lagen.length);
+		if (lagen.length) {
+			expect(r?.lat).toBeCloseTo(lagen.reduce((a, l) => a + l.lat, 0) / lagen.length, 9);
+			expect(r?.lon).toBeCloseTo(lagen.reduce((a, l) => a + l.lon, 0) / lagen.length, 9);
+			expect(r?.min_lat).toBe(Math.min(...lagen.map((l) => l.lat)));
+			expect(r?.max_lon).toBe(Math.max(...lagen.map((l) => l.lon)));
+		}
+	}
+	const over: Record<string, string[]> = { socken: ["kommun", "lan"], kommun: ["lan"] };
+	const forvantad = new Map<string, number>();
+	for (const [, omraden] of perLamning)
+		for (const a of omraden)
+			for (const b of omraden)
+				if (over[omr.get(a) ?? ""]?.includes(omr.get(b) ?? "")) forvantad.set(`${a}>${b}`, (forvantad.get(`${a}>${b}`) ?? 0) + 1);
+	const rel = new Map((db.prepare("SELECT omrade_id, overordnad_id, antal FROM omrade_relation").all() as Array<{ omrade_id: number; overordnad_id: number; antal: number }>).map((r) => [`${r.omrade_id}>${r.overordnad_id}`, r.antal]));
+	expect(Object.fromEntries(rel)).toEqual(Object.fromEntries(forvantad));
+	const niva = Object.fromEntries((db.prepare("SELECT niva, med_omrade FROM niva_sammanfattning").all() as Array<{ niva: string; med_omrade: number }>).map((r) => [r.niva, r.med_omrade]));
+	for (const n of ["lan", "kommun", "socken", "landskap"]) {
+		const med = [...perLamning.values()].filter((omraden) => omraden.some((a) => omr.get(a) === n)).length;
+		expect(niva[n] ?? 0, `niva ${n}`).toBe(med);
+	}
+}
+
+describe("områdestabellerna efter nattsynken (facit: direkt räkning)", () => {
+	it("ny, flyttad (annan socken och kommun) och borttagen lämning: sammanfattning, relationer och nivåer stämmer", async () => {
+		const db = emptyDb();
+		try {
+			const raa = fakeRaa();
+			const env = { DB: openD1(db), SEMANTIC_LAN: "Dalarna" };
+			const o = (now: Date) => ({ now, fetch: raa.fetch, sleep: noSleep, pausMs: 0 });
+			raa.flode.set("2026-11-11", [flodePost(UUID.L2001_646, "L2001:646", ["NY"]), flodePost(UUID.L2000_8802, "L2000:8802", ["NY"]), flodePost(UUID.L1946_7415, "L1946:7415", ["NY"])]);
+			expect(await runSync(env, o(NU))).toMatchObject({ nya: 3, status: "klar" });
+			kontrolleraOmraden(db);
+			const fore = db.prepare("SELECT o.niva, o.namn FROM omrade o JOIN lamning_omrade lo ON lo.omrade_id = o.id JOIN lamning l ON l.id = lo.lamning_id WHERE l.uuid = ? ORDER BY o.niva").all(UUID.L2001_646);
+			expect(fore).toContainEqual({ niva: "socken", namn: "Bjursås" });
+
+			// Dag 2: L2001:646 flyttas till Leksands socken och kommun, L2000:8802 utgår, en ny lämning tillkommer.
+			const flyttad = appFixture(UUID.L2001_646);
+			const lage = flyttad.nuvarande_lage as { geografisk_indelning: Record<string, unknown> };
+			lage.geografisk_indelning = {
+				kommun: [{ kommun_kod: "2029", kommun_namn: "Leksand", lan_kod: "20", lan_namn: "Dalarna" }],
+				socken: [{ socken_id: "ef54bb9b-2060-49f5-9dc2-2a718cea368d", socken_namn: "Leksand" }],
+				landskap: [{ landskap_kod: "Dr", landskap_namn: "Dalarna" }],
+			};
+			raa.app.set(UUID.L2001_646, flyttad);
+			const NY = "11111111-2222-4333-8444-555555555555";
+			const ny = appFixture(UUID.L1946_7415);
+			ny.lamning_id = NY;
+			ny.lamningsnummer = "L2099:1";
+			raa.app.set(NY, ny);
+			raa.flode.set("2026-11-12", [flodePost(UUID.L2001_646, "L2001:646", ["UPPDATERAD_LAGE"]), flodePost(UUID.L2000_8802, "L2000:8802", ["UTGAR"]), flodePost(NY, "L2099:1", ["NY"])]);
+			expect(await runSync(env, o(dagEfter(NU, 1)))).toMatchObject({ nya: 1, andrade: 1, borttagna: 1, status: "klar" });
+			const efter = db.prepare("SELECT o.niva, o.namn FROM omrade o JOIN lamning_omrade lo ON lo.omrade_id = o.id JOIN lamning l ON l.id = lo.lamning_id WHERE l.uuid = ? ORDER BY o.niva").all(UUID.L2001_646);
+			expect(efter).toContainEqual({ niva: "socken", namn: "Leksand" });
+			expect(efter).toContainEqual({ niva: "kommun", namn: "Leksand" });
+			expect(efter).not.toContainEqual({ niva: "socken", namn: "Bjursås" });
+			expect(count(db, "SELECT count(*) AS n FROM lamning")).toBe(3);
+			kontrolleraOmraden(db);
+			// Bjursås och Falun (där lämningarna låg) har nu inga lämningar alls.
+			expect(db.prepare("SELECT s.antal FROM omrade_sammanfattning s JOIN omrade o ON o.id = s.omrade_id WHERE o.niva = 'socken' AND o.namn = 'Bjursås'").get()).toEqual({ antal: 0 });
+		} finally {
+			db.close();
+		}
+	});
+});
+
+describe("mycket stora ändringsdagar", () => {
+	it("fler sidor än FLODE_MAX_SIDOR: intervallet delas per dag och sidstorleken höjs, i stället för att synken kör fast", async () => {
+		const db = emptyDb();
+		try {
+			const raa = fakeRaa();
+			const mangd = (dag: string, n: number) => Array.from({ length: n }, (_, i) => flodePost(`00000000-0000-4000-8${dag.slice(-1)}00-${String(i).padStart(12, "0")}`, `L2099:${dag.slice(-2)}${i}`, ["UTGAR"]));
+			raa.flode.set("2026-11-09", mangd("2026-11-09", 150));
+			raa.flode.set("2026-11-10", mangd("2026-11-10", 150));
+			raa.flode.set("2026-11-11", [flodePost(UUID.L2001_646, "L2001:646", ["NY"])]);
+			db.prepare("INSERT INTO synk_status (nyckel, varde, andrad) VALUES ('senast_synkat', '2026-11-08', 't')").run();
+			const env = { DB: openD1(db), SEMANTIC_LAN: "Dalarna" };
+			// Sidstorlek 1: tre dagar ger 301 sidor, en dag 150 (inom gränsen).
+			const o = { now: NU, fetch: raa.fetch, sleep: noSleep, pausMs: 0, sidstorlek: 1, maxPoster: 1000 };
+			const r1 = await runSync(env, o);
+			expect(r1.status).not.toBe("fel");
+			expect(r1).toMatchObject({ fran: "2026-11-09", till: "2026-11-09", senast_synkat: "2026-11-09" });
+			// En enda dag med fler sidor än gränsen: större sidor.
+			raa.flode.set("2026-11-10", mangd("2026-11-10", 450));
+			const r2 = await runSync(env, o);
+			expect(r2.status).not.toBe("fel");
+			expect(r2).toMatchObject({ fran: "2026-11-10", till: "2026-11-10", senast_synkat: "2026-11-10" });
+			const storlekar = raa.calls.filter((u) => u.searchParams.get("from") === "2026-11-10" && u.searchParams.get("to") === "2026-11-10").map((u) => Number(u.searchParams.get("size")));
+			expect(Math.max(...storlekar)).toBeGreaterThan(1);
+			const r3 = await runSync(env, o);
+			expect(r3).toMatchObject({ status: "klar", senast_synkat: "2026-11-11", nya: 1 });
+		} finally {
+			db.close();
+		}
+	});
+});
+
 describe("senasteKlaraDag", () => {
 	it("gårdagen räknas som klar först efter 04:30 svensk tid", () => {
 		expect(senasteKlaraDag(new Date("2026-11-12T03:29:00Z"))).toBe("2026-11-10"); // 04:29 CET

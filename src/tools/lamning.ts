@@ -6,7 +6,7 @@ import { type Geometry, simplifyToLimit, swerefToWgs, wgsToSweref, countPosition
 import { type ParsedId, parseId } from "../ids";
 import type { LamningPost, RecordFetchResult, Referenser, Version } from "../sources/types";
 import { IndexInputError } from "../store/d1";
-import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, citat, fmtCoord, list, ok, rad, runTool, EXTERN_TEXT } from "./common";
+import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, citat, citatStycken, fmtCoord, list, ok, rad, runTool, EXTERN_TEXT } from "./common";
 import { type DokumentPost, dokumentPost, formatDokumentRad, toDokumentPost } from "./dokument";
 import type { OpenIndex } from "./via_index";
 
@@ -376,22 +376,25 @@ function stripBoilerplate(s: string | null): string | null {
 
 export function formatPost(l: LamningPost): string {
 	const lines: string[] = [];
-	const id = [l.lamningsnummer, l.raa_nummer ? `(${l.raa_nummer})` : null].filter(Boolean).join(" ");
-	lines.push(`${id} – ${l.lamningstyp ?? "okänd typ"}${l.kategori?.length ? ` [${l.kategori.join(", ")}]` : ""}`);
+	const id = [rad(l.lamningsnummer), l.raa_nummer ? `(${rad(l.raa_nummer)})` : null].filter(Boolean).join(" ");
+	lines.push(`${id} – ${rad(l.lamningstyp) || "okänd typ"}${l.kategori?.length ? ` [${l.kategori.map(rad).join(", ")}]` : ""}`);
 	lines.push(`Länk: ${l.url}`);
 	lines.push(
 		`Antikvarisk bedömning (registrets): ${rad(l.antikvarisk_bedomning.varde) || "saknas"}${l.antikvarisk_bedomning.motivering ? ` – motivering (källtext): ${citat(l.antikvarisk_bedomning.motivering)}` : ""}`,
 	);
-	lines.push(`Indelning: ${list([list(l.indelning.lan), list(l.indelning.kommun), list(l.indelning.socken)])}${l.indelning.landskap.length ? `; landskap ${list(l.indelning.landskap)}` : ""}`);
+	const ind = (xs: string[]) => list(xs.map(rad));
+	lines.push(`Indelning: ${list([ind(l.indelning.lan), ind(l.indelning.kommun), ind(l.indelning.socken)])}${l.indelning.landskap.length ? `; landskap ${ind(l.indelning.landskap)}` : ""}`);
 	const osak = l.lage.osakerhet_m !== null ? `, lägesosäkerhet ${l.lage.osakerhet_m} m` : "";
 	const sw = l.lage.sweref99tm ? ` (SWEREF 99 TM N ${l.lage.sweref99tm.n}, E ${l.lage.sweref99tm.e})` : "";
-	lines.push(`Läge: ${fmtCoord(l.lage.lat, l.lage.lon)}${sw}${osak}${l.lage.geometrityp ? `, geometri ${l.lage.geometrityp}` : ""}`);
+	lines.push(`Läge: ${fmtCoord(l.lage.lat, l.lage.lon)}${sw}${osak}${l.lage.geometrityp ? `, geometri ${rad(l.lage.geometrityp)}` : ""}`);
 	if (l.namn?.length) lines.push(`Namn (källtext): ${l.namn.map(citat).join(", ")}`);
-	const statusar = list([l.statusar.aktualitet, l.statusar.placering, l.statusar.skada ? `skada: ${l.statusar.skada}` : null, l.statusar.undersokning ? `undersökning: ${l.statusar.undersokning}` : null]);
+	const st = l.statusar;
+	const statusar = list([rad(st.aktualitet), rad(st.placering), st.skada ? `skada: ${rad(st.skada)}` : null, st.undersokning ? `undersökning: ${rad(st.undersokning)}` : null]);
 	if (statusar) lines.push(`Status: ${statusar}`);
+	// Långa textfält: styckebrytningarna behålls (citatStycken: fortsättningsraderna indragna).
 	const kt = (label: string, v: string | null | undefined) => {
-		const t = stripBoilerplate(v ?? null);
-		if (t) lines.push(`${label} (källtext): ${citat(t)}`);
+		const t = citatStycken(stripBoilerplate(v ?? null));
+		if (t) lines.push(`${label} (källtext): ${t}`);
 	};
 	kt("Beskrivning", l.beskrivning);
 	kt("Tradition", l.tradition);

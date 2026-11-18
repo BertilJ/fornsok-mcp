@@ -230,6 +230,12 @@ export interface Socken {
 	id: string;
 	namn: string;
 	kommunkoder: string[];
+	/**
+	 * Bara i listor byggda ur indexet: flera socknar med samma namn i samma län,
+	 * som indexet har slagit ihop till en (t.ex. Mo och Råda i Västra Götaland).
+	 * Namnuppslaget kräver då en kommun och avgränsar på den.
+	 */
+	sammanslagen?: boolean;
 }
 export interface Landskap {
 	kod: string;
@@ -251,6 +257,12 @@ export interface Domaner {
 	hamtad: string;
 	/** Varifrån listorna kom: indexet eller Fornsök-appen (saknas = appen). */
 	kalla?: "index" | "fornsokapp";
+	/**
+	 * true när listorna är byggda ur indexet i väntan på Fornsök-appens kopia
+	 * (src/lookup/index_domaner.ts): cachas bara kort, så att kopian används så
+	 * snart den finns.
+	 */
+	kortlivad?: boolean;
 }
 
 export interface DomainSource {

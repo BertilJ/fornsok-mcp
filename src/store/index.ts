@@ -7,6 +7,7 @@
  * Alla frågor är parametriserade. FTS5-uttryck byggs i fts.ts av validerade ord.
  */
 import { KALLA, publicUrl } from "../config";
+import { radbrytningarTillSnedstreck, rensaRad, rensaTecken, TRAFF_SLUT, TRAFF_START } from "../extern_text";
 import { compassDirection, type Geometry, nearestPoint, wgsToSweref } from "../geo/geometry";
 import { round, type Planar } from "../geo/sweref";
 import type {
@@ -48,12 +49,23 @@ export const MAX_STATISTIK_RADER = 200;
  */
 export const MAX_RANKAD = 150_000;
 /**
- * Statistik som inte kan räknas ur de förberäknade tabellerna görs bara för
- * högst så många lämningar: två nivåer (cirka 7 µs per lämning lokalt), och en
- * nivå område eller kategori med filter (cirka 2 µs per lämning).
+ * Gränser för statistik som inte kan räknas ur de förberäknade tabellerna
+ * (antal lämningar som matchar filtret). Uppmätt mot en lokal laddning av hela
+ * landet (766 389 lämningar, scripts/matning.ts); D1 är ungefär dubbelt så
+ * långsam.
+ *
+ * - En nivå: cirka 2 µs per lämning lokalt (hela registret per kategori 1,9 s;
+ *   fornlämningar per län i D1 1,2 s). Gränsen ligger över registrets storlek,
+ *   så varje filter går igenom.
+ * - Två nivåer: 3–5 µs per lämning med filter på typ, kategori, bedömning eller
+ *   fritext (fornlämningar per län och typ, 319 535 lämningar, 1,0 s), men
+ *   7–11 µs med filter på område eller egenskap, eftersom filtret då läser fler
+ *   rader än det släpper igenom (196 000 fornlämningar i tio län 2,1 s).
+ *   Gränserna håller två nivåer under cirka 2 s lokalt.
  */
-export const MAX_STATISTIK_LAMNINGAR = 50_000;
-export const MAX_STATISTIK_LAMNINGAR_EN_NIVA = 150_000;
+export const MAX_STATISTIK_LAMNINGAR_EN_NIVA = 1_500_000;
+export const MAX_STATISTIK_LAMNINGAR = 400_000;
+export const MAX_STATISTIK_LAMNINGAR_TVA_NIVAER_OMRADE = 200_000;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -61,7 +73,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export interface IndexHit extends SearchHit {
 	url: string;
-	/** Cirka 200 tecken runt träffen, med träffade ord inom «». Utan sökord: beskrivningens början. */
+	/** Cirka 200 tecken runt träffen, med träffade ord inom ⟦⟧ (extern_text.ts). Utan sökord: beskrivningens början. */
 	utdrag: string | null;
 	sweref99tm: Sweref | null;
 	geometrityp: string | null;
@@ -206,22 +218,50 @@ export function compareLamningsnummer(a: string | null, b: string | null): numbe
 }
 
 const RANK = "bm25(lamning_fts, 4.0, 4.0, 1.0, 2.0, 0.5)";
-// Träffarna markeras först med styrtecken (som inte finns i registertexten efter rensningen
-// nedan) och blir «» först när texten rensats: «» i själva registertexten byts mot ‹›.
-const SNIPPETS = [2, 3, 4].map((c, i) => `, snippet(lamning_fts, ${c}, char(1), char(2), ' … ', 32) AS ${["s_besk", "s_trad", "s_terr"][i]}`).join("");
+/**
+ * Utdrag med snippet(): träffarna markeras med en slumpad markör per fråga (som
+ * källtexten i praktiken inte kan innehålla), texten mellan markörerna rensas
+ * (extern_text.ts: styrtecken, osynliga tecken och avgränsningstecken bort) och
+ * markörerna blir till sist ⟦⟧. Tecken i registertexten kan därför aldrig bli
+ * träffmarkeringar, och «»/⟦⟧ i registertexten byts mot ‹›/[].
+ */
+const SNIPPET_KOLUMNER = [
+	[2, "s_besk"],
+	[3, "s_trad"],
+	[4, "s_terr"],
+] as const;
+const SNIPPETS = SNIPPET_KOLUMNER.map(([c, a]) => `, snippet(lamning_fts, ${c}, ?, ?, ' … ', 32) AS ${a}`).join("");
 
-/** Extern text på en rad: styrtecken bort, radbrytningar som " / ", «» → ‹› (samma som rad() i tools/common.ts). */
-// oxlint-disable-next-line no-control-regex -- styrtecken tas bort avsiktligt
-const STYRTECKEN = /[\u0000\u0003-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
-// oxlint-disable-next-line no-control-regex -- träffmarkeringarna är styrtecken
-const TRAFF_START = /\u0001/g;
-// oxlint-disable-next-line no-control-regex -- träffmarkeringarna är styrtecken
-const TRAFF_SLUT = /\u0002/g;
-// oxlint-disable-next-line no-control-regex -- träffmarkeringarna är styrtecken
-const TRAFF = /[\u0001\u0002]/g;
+interface Markorer {
+	start: string;
+	slut: string;
+}
 
+function nyaMarkorer(): Markorer {
+	const b = new Uint8Array(9);
+	crypto.getRandomValues(b);
+	const nonce = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+	return { start: `\u0001${nonce}\u0002`, slut: `\u0002${nonce}\u0001` };
+}
+
+/** Extern text på en rad (samma som rad() i tools/common.ts), blanksteg ihopslagna. */
 function rensa(s: string): string {
-	return s.replace(/\r\n?|\n/g, " / ").replace(STYRTECKEN, " ").replace(/«/g, "‹").replace(/»/g, "›").replace(/\s+/g, " ").trim();
+	return rensaRad(s).replace(/\s+/g, " ").trim();
+}
+
+/** Ett snippet med markörer → rensad text med träffarna inom ⟦⟧. */
+function markera(v: string, m: Markorer): string {
+	const delar = v.split(m.start);
+	let out = rensaTecken(delar[0].split(m.slut).join(""));
+	for (const d of delar.slice(1)) {
+		const i = d.indexOf(m.slut);
+		const traff = i >= 0 ? d.slice(0, i) : d;
+		const rest = i >= 0 ? d.slice(i + m.slut.length).split(m.slut).join("") : "";
+		const t = rensaTecken(traff).replace(/\s+/g, " ").trim();
+		out += t ? `${TRAFF_START}${t}${TRAFF_SLUT}` : "";
+		out += rensaTecken(rest);
+	}
+	return radbrytningarTillSnedstreck(out);
 }
 /** Geometrier läses i omgångar om så många id. */
 const GEOMETRI_OMGANG = 1000;
@@ -252,7 +292,7 @@ function ftsFrom(conditions: FilterPart[], fts: FtsQuery): { from: string; where
 /** Kort början av en text, avkortad vid ordgräns. */
 export function lead(text: string | null, max = UTDRAG_TECKEN): string | null {
 	if (!text) return null;
-	const t = rensa(text.replace(TRAFF, " "));
+	const t = rensa(text);
 	if (t.length <= max) return t;
 	const cut = t.slice(0, max);
 	const sp = cut.lastIndexOf(" ");
@@ -263,11 +303,12 @@ export function lead(text: string | null, max = UTDRAG_TECKEN): string | null {
  * Utdrag: första långa textkolumn (beskrivning, tradition, terräng) med träff;
  * träff bara i typ eller namn ger beskrivningens början.
  */
-function chooseUtdrag(r: Row): string | null {
-	for (const k of ["s_besk", "s_trad", "s_terr"]) {
-		const v = str(r[k]);
-		if (v?.includes("\u0001")) return rensa(v).replace(TRAFF_START, "«").replace(TRAFF_SLUT, "»");
-	}
+function chooseUtdrag(r: Row, m: Markorer | null): string | null {
+	if (m)
+		for (const [, k] of SNIPPET_KOLUMNER) {
+			const v = str(r[k]);
+			if (v?.includes(m.start)) return markera(v, m);
+		}
 	return lead(str(r.beskrivning));
 }
 
@@ -305,10 +346,20 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 	private byggdatumCache: { value: string | null; at: number } | null = null;
 	/** Högst så många kandidater prövas med exakt avstånd (inställbart för test). */
 	private readonly maxKandidater: number;
+	/** Gränserna för statistik som inte kan räknas ur de förberäknade tabellerna (inställbara för test och mätning). */
+	private readonly statistikGrans: { enNiva: number; tvaNivaer: number; tvaNivaerOmrade: number };
 
-	constructor(db: D1Like, options: { maxKandidater?: number } = {}) {
+	constructor(
+		db: D1Like,
+		options: { maxKandidater?: number; statistikEnNiva?: number; statistikTvaNivaer?: number; statistikTvaNivaerOmrade?: number } = {},
+	) {
 		this.db = db;
 		this.maxKandidater = Math.max(1, Math.trunc(options.maxKandidater ?? MAX_KANDIDATER));
+		this.statistikGrans = {
+			enNiva: options.statistikEnNiva ?? MAX_STATISTIK_LAMNINGAR_EN_NIVA,
+			tvaNivaer: options.statistikTvaNivaer ?? MAX_STATISTIK_LAMNINGAR,
+			tvaNivaerOmrade: options.statistikTvaNivaerOmrade ?? MAX_STATISTIK_LAMNINGAR_TVA_NIVAER_OMRADE,
+		};
 	}
 
 	private stmt(part: SqlPart | string, extra: unknown[] = []): D1LikeStatement {
@@ -523,17 +574,18 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 	}
 
 	/** Träffrader (med utdrag runt sökorden när `fts` finns) för givna id, i godtycklig ordning. */
-	private async hitRows(ids: number[], fts: FtsQuery | null): Promise<Map<number, Row>> {
-		if (!ids.length) return new Map();
-		const rows = fts
+	private async hitRows(ids: number[], fts: FtsQuery | null): Promise<{ rows: Map<number, Row>; m: Markorer | null }> {
+		if (!ids.length) return { rows: new Map(), m: null };
+		const m = fts ? nyaMarkorer() : null;
+		const rows = fts && m
 			? await this.all(
 					{
 						sql: `SELECT ${HIT_COLUMNS}${SNIPPETS} FROM lamning l CROSS JOIN lamning_fts f ON f.rowid = l.id WHERE l.id IN (SELECT value FROM json_each(?)) AND f.lamning_fts MATCH ?`,
-						params: [JSON.stringify(ids), fts.match],
+						params: [...SNIPPET_KOLUMNER.flatMap(() => [m.start, m.slut]), JSON.stringify(ids), fts.match],
 					},
 				)
 			: await this.all(`SELECT ${HIT_COLUMNS} FROM lamning l WHERE l.id IN (SELECT value FROM json_each(?))`, [JSON.stringify(ids)]);
-		return new Map(rows.map((r) => [Number(r.id), r]));
+		return { rows: new Map(rows.map((r) => [Number(r.id), r])), m };
 	}
 
 	/**
@@ -585,12 +637,12 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 			pageIds = beyond ? [] : hits.slice(offset, offset + antal).map((h) => ({ id: h.id, d: h.m.distance, dir: h.m.dir }));
 		}
 		const ids = pageIds.map((x) => x.id);
-		const [rows, areas] = await Promise.all([this.hitRows(ids, b.fts), this.areasFor(ids)]);
+		const [{ rows, m }, areas] = await Promise.all([this.hitRows(ids, b.fts), this.areasFor(ids)]);
 		const traffar: IndexHit[] = [];
 		for (const x of pageIds) {
 			const r = rows.get(x.id);
 			if (!r) continue;
-			const hit = this.toHit(r, areas.get(x.id), chooseUtdrag(r));
+			const hit = this.toHit(r, areas.get(x.id), chooseUtdrag(r, m));
 			traffar.push(x.d !== undefined ? { ...hit, avstand_m: Math.round(x.d), vaderstreck: x.dir ?? null } : hit);
 		}
 		return {
@@ -687,11 +739,11 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 		if (!kept.length) return out;
 		const ids = kept.map((r) => Number(r.id));
 		// Utdrag runt sökorden för de träffar som innehåller dem; övriga får beskrivningens början.
-		const [snippets, areas] = await Promise.all([fts ? this.hitRows(ids, fts) : new Map<number, Row>(), this.areasFor(ids)]);
+		const [snippets, areas] = await Promise.all([fts ? this.hitRows(ids, fts) : { rows: new Map<number, Row>(), m: null }, this.areasFor(ids)]);
 		for (const r of kept) {
 			const id = Number(r.id);
-			const sn = snippets.get(id);
-			const hit = this.toHit(r, areas.get(id), sn ? chooseUtdrag(sn) : lead(str(r.beskrivning)));
+			const sn = snippets.rows.get(id);
+			const hit = this.toHit(r, areas.get(id), sn ? chooseUtdrag(sn, snippets.m) : lead(str(r.beskrivning)));
 			const d = dist.get(id);
 			out.set(hit.uuid, d ? { ...hit, avstand_m: Math.round(d.d), vaderstreck: d.dir } : hit);
 		}
@@ -728,7 +780,7 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 		hits.sort((a, b) => a.m.distance - b.m.distance || a.id - b.id);
 		const top = hits.slice(0, antal);
 		const ids = top.map((x) => x.id);
-		const [rows, areas, byggdatum] = await Promise.all([this.hitRows(ids, null), this.areasFor(ids), this.byggdatum()]);
+		const [{ rows }, areas, byggdatum] = await Promise.all([this.hitRows(ids, null), this.areasFor(ids), this.byggdatum()]);
 		const traffar: NearbyIndexPage["traffar"] = [];
 		for (const x of top) {
 			const r = rows.get(x.id);
@@ -804,8 +856,10 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 	 * - Annars: först mängden lämningar som uppfyller filtret (FTS-tabellen som
 	 *   yttre loop med sökord, närhetens kandidater med `nara`), sedan en
 	 *   gruppering över den, med områdena via indexet på lamning_omrade(lamning_id).
-	 *   Kräver grupperingen område eller två nivåer görs den bara för högst
-	 *   MAX_STATISTIK_LAMNINGAR lämningar; fler ger ett fel som ber om ett filter.
+	 *   Två nivåer görs bara för högst MAX_STATISTIK_LAMNINGAR lämningar
+	 *   (MAX_STATISTIK_LAMNINGAR_TVA_NIVAER_OMRADE med filter på område eller
+	 *   egenskap); fler ger ett fel som säger hur frågan kan delas. En nivå går
+	 *   för hela registret med vilket filter som helst.
 	 */
 	async statistik(gruppera_pa: StatistikDimension[], filter: IndexSearchFilter = {}): Promise<StatistikResult> {
 		if (!Array.isArray(gruppera_pa) || gruppera_pa.length < 1 || gruppera_pa.length > 2)
@@ -892,11 +946,17 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 			const [c] = await this.batch([this.stmt({ sql: `SELECT count(*) AS c FROM (${mangd.sql})`, params: mangd.params })]);
 			totalt = num(c[0]?.c) ?? 0;
 		}
-		const grans = gruppera_pa.length === 2 ? MAX_STATISTIK_LAMNINGAR : AREA_DIMS.has(d0) || d0 === "kategori" ? MAX_STATISTIK_LAMNINGAR_EN_NIVA : Number.POSITIVE_INFINITY;
+		// Filter på område eller egenskap läser fler rader än det släpper igenom, och
+		// kostar därför mer per lämning i resultatet (se MAX_STATISTIK_LAMNINGAR).
+		const dyrtFilter = !!(filter.lan?.length || filter.kommun?.length || filter.landskap?.length || filter.socken?.length || filter.egenskap?.length);
+		const grans =
+			gruppera_pa.length === 2 ? (dyrtFilter ? this.statistikGrans.tvaNivaerOmrade : this.statistikGrans.tvaNivaer) : AREA_DIMS.has(d0) || d0 === "kategori" ? this.statistikGrans.enNiva : Number.POSITIVE_INFINITY;
 		if (totalt > grans) {
 			throw new IndexInputError(
-				`Statistiken omfattar ${totalt} lämningar; gruppering på ${gruppera_pa.join(" och ")} görs för högst ${grans} åt gången (frågan blir annars för tung för databasen). ` +
-					"Avgränsa med län, kommun, landskap, typ eller bedömning, eller gruppera på en nivå utan filter (det går för hela landet).",
+				gruppera_pa.length === 2
+					? `Statistiken omfattar ${totalt} lämningar; gruppering på två nivåer (${gruppera_pa.join(" och ")}) görs för högst ${grans} lämningar${dyrtFilter ? " med filter på område eller egenskap" : ""} (frågan blir annars för tung för databasen). ` +
+							"Gruppera på en nivå (det går med vilket filter som helst, för hela registret), eller avgränsa ytterligare med typ, kategori, bedömning eller färre områden."
+					: `Statistiken omfattar ${totalt} lämningar; gruppering på ${gruppera_pa[0]} görs för högst ${grans} åt gången. Avgränsa med ett filter.`,
 			);
 		}
 

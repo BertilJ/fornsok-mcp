@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Ingen behörighet utöver att läsa koden. Inga hemligheter används.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kontroll:
+    name: Typkontroll, lint och tester
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # actions/setup-node v7.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Installera beroenden
+        run: npm ci
+
+      # tsc för Workern, för testerna och för ingest/ (skriptet type-check i package.json)
+      - name: Typkontroll
+        run: npm run type-check
+
+      - name: Lint
+        run: npx oxlint
+
+      # Tester som kräver stora lokala filer (GeoPackage i ingest/.cache) hoppar över sig själva.
+      # Inga anrop mot RAÄ görs här; kontrakttesterna körs i kontrakt.yml.
+      - name: Tester
+        run: npx vitest run

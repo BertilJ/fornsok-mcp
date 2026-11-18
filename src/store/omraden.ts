@@ -21,7 +21,8 @@
  * - Inläsningen (ingest/) räknar om allt sist i varje SQL-körning.
  * - Nattsynken markerar de områden en skriven eller borttagen lämning ligger i
  *   (före och efter) med `inaktuell = 1`, och räknar om de markerade efter
- *   körningen (refreshInaktuella).
+ *   körningen (refreshInaktuella). niva_sammanfattning ändras med ±1 i samma
+ *   transaktion som lämningen skrivs (nivaDeltaSats).
  *
  * Är en rad inaktuell eller saknas den, är uppgiften i värsta fall ett dygn
  * gammal; antal och mittpunkt flyttar sig sällan märkbart av en natts ändringar.
@@ -102,6 +103,22 @@ export function markeraOmradenSats(db: D1Like, uuid: string): D1LikeStatement {
 		.bind(uuid);
 }
 
+/**
+ * Ändrar niva_sammanfattning (antal lämningar med område per nivå) med ±1 för
+ * varje nivå där lämningen har minst ett område just nu. Körs i samma batch
+ * (transaktion) som lämningens områden skrivs om: −1 före borttagningen av
+ * dess rader i lamning_omrade, +1 efter att de nya skrivits. Då hålls antalet
+ * exakt utan att nattsynken räknar om hela nivån (cirka 765 000 rader per nivå
+ * i hela landet); inläsningen räknar ändå om allt (fullRecomputeSql).
+ */
+export function nivaDeltaSats(db: D1Like, uuid: string, tecken: 1 | -1): D1LikeStatement {
+	return db
+		.prepare(
+			`UPDATE niva_sammanfattning SET med_omrade = med_omrade ${tecken > 0 ? "+" : "-"} 1 WHERE niva IN (SELECT DISTINCT o.niva FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE lo.lamning_id = (SELECT id FROM lamning WHERE uuid = ?))`,
+		)
+		.bind(uuid);
+}
+
 /** Satser som räknar om givna områden (alla på samma nivå). */
 export function recomputeSatser(db: D1Like, niva: string, ids: number[]): D1LikeStatement[] {
 	if (!ids.length) return [];
@@ -124,6 +141,10 @@ export interface RefreshResult {
  * Räkna om de områden som nattsynken markerat som inaktuella. Socknar och
  * kommuner i grupper om 20, län och landskap (upp till 150 000 lämningar)
  * ett i taget. Högst `max` områden per körning; resten tas nästa gång.
+ *
+ * niva_sammanfattning hålls aktuell av nattsynkens skrivningar (nivaDeltaSats)
+ * och räknas här bara om för en nivå som saknar rad eller är markerad
+ * inaktuell (t.ex. efter en ofullständig migrering).
  */
 export async function refreshInaktuella(db: D1Like, opts: { max?: number } = {}): Promise<RefreshResult> {
 	const max = Math.max(1, opts.max ?? 400);
@@ -141,8 +162,12 @@ export async function refreshInaktuella(db: D1Like, opts: { max?: number } = {})
 		const ids = valda.filter((r) => r.niva === niva).map((r) => Number(r.id));
 		const per = niva === "socken" || niva === "kommun" ? 20 : 1;
 		for (let i = 0; i < ids.length; i += per) await db.batch(recomputeSatser(db, niva, ids.slice(i, i + per)));
-		// Antalet lämningar med område på nivån (läser nivåns index en gång).
-		if (ids.length) await db.batch([db.prepare(NIVA_UPSERT.replaceAll("{NIVA}", niva).replace("{VILLKOR}", "true"))]);
+	}
+	if (valda.length) {
+		const finns = (await db.prepare("SELECT niva FROM niva_sammanfattning WHERE inaktuell = 0").all<{ niva: string }>()).results.map((r) => r.niva);
+		// Saknad eller inaktuell nivå: räkna om den (läser nivåns index en gång).
+		for (const niva of NIVAER.filter((n) => !finns.includes(n)))
+			await db.batch([db.prepare(NIVA_UPSERT.replaceAll("{NIVA}", niva).replace("{VILLKOR}", "true"))]);
 	}
 	return { omraknade: valda.length, kvar };
 }

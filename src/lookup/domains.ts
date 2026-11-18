@@ -21,6 +21,8 @@ export interface ResolvedSocken {
 
 /** Hur länge ett misslyckat hämtförsök gör att nya försök väntar (felcache). */
 export const DOMAIN_ERROR_TTL_MS = 15_000;
+/** Listor byggda ur indexet i väntan på appens kopia (Domaner.kortlivad) cachas högst så länge. */
+export const DOMAIN_KORT_TTL_MS = 60_000;
 /** Längsta väntan på en annan förfrågans pågående hämtning innan man hämtar själv. */
 export const DOMAIN_SHARED_WAIT_MS = 25_000;
 
@@ -90,7 +92,8 @@ export class DomainService {
 	 */
 	async get(): Promise<Domaner> {
 		const t = this.now();
-		if (this.cache && t - this.cache.at < this.ttlMs) return this.cache.value;
+		const ttl = this.cache?.value.kortlivad ? Math.min(this.ttlMs, DOMAIN_KORT_TTL_MS) : this.ttlMs;
+		if (this.cache && t - this.cache.at < ttl) return this.cache.value;
 		if (this.failure && t - this.failure.at < this.errorTtlMs && t >= this.failure.at) {
 			if (this.cache) return this.cache.value;
 			throw this.failure.error;
@@ -288,6 +291,7 @@ export class DomainService {
 					);
 				}
 				const s = candidates[0];
+				if (s.sammanslagen) return this.sammanslagenSocken(s, d, input, qualifier, kontext);
 				if (nationallyUnique) return { namn: s.namn, id: s.id };
 				const lan = this.lanForSocken(s);
 				const out: ResolvedSocken = { namn: s.namn, id: s.id, lan };
@@ -314,6 +318,38 @@ export class DomainService {
 		} catch (e) {
 			return this.reservVid(e, (r) => r.resolveSocknar(inputs, kontext));
 		}
+	}
+
+	/**
+	 * En socken som indexet slagit ihop med andra med samma namn i samma län
+	 * (listor ur indexet utan appens kopia). Med en kommun (kvalificerare eller
+	 * kommunfilter) avgränsas sökningen till socknens lämningar i kommunen, och
+	 * svaret säger det; utan kommun går namnet inte att avgöra.
+	 */
+	private sammanslagenSocken(s: Socken, d: Domaner, input: string, qualifier: string | null, kontext: { kommunkoder?: string[] }): ResolvedSocken {
+		const lan = this.lanForSocken(s);
+		const lanText = lan.join("/") || "samma län";
+		const namnFor = (koder: string[]) => [...new Set(koder.map((k) => d.kommuner.find((x) => x.kod === k)?.namn).filter((x): x is string => !!x))];
+		const qualKommun = qualifier ? d.kommuner.find((k) => normalizeName(k.namn) === normalizeName(qualifier).replace(/ kommun$/, "")) : undefined;
+		const koder = (qualKommun ? [qualKommun.kod] : (kontext.kommunkoder ?? [])).filter((k) => s.kommunkoder.includes(k));
+		const kommuner = namnFor(koder);
+		const alla = namnFor(s.kommunkoder);
+		if (!kommuner.length) {
+			throw new ToolInputError(
+				`Socknen "${input}" är flertydig: det finns flera socknar som heter ${s.namn} i ${lanText}, och serverns index skiljer inte på dem (Fornsök-appens värdelista, som gör det, gick inte att hämta). ` +
+					`Ange kommun, t.ex. "${s.namn} (${alla[0] ?? "kommun"})"${alla.length ? `. Kommuner där indexet har lämningar i en socken ${s.namn} i ${lanText}: ${alla.join(", ")}` : ""}.`,
+				{ kandidater: alla.map((k) => `${s.namn} (${k})`) },
+			);
+		}
+		return {
+			namn: s.namn,
+			id: s.id,
+			...(lan.length ? { lan } : {}),
+			kommun: kommuner,
+			anmarkning:
+				`Det finns flera socknar som heter ${s.namn} i ${lanText}, och serverns index skiljer inte på dem (Fornsök-appens värdelista gick inte att hämta). ` +
+				`Sökningen gäller lämningar i en socken ${s.namn} som ligger i ${kommuner.join(", ")} kommun; ligger fler av socknarna i samma kommun kan träffar från dem komma med.`,
+		};
 	}
 }
 

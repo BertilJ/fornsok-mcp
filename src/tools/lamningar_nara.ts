@@ -7,7 +7,7 @@ import { bboxAround, compassDirection, type Geometry, nearestPoint, wgsToSweref 
 import { isInSweden, type Planar, round, toLatLon, toPlanar } from "../geo/sweref";
 import { BEDOMNINGAR, type NearbyFeature, type NearbyPage } from "../sources/types";
 import { reservHamtadFran } from "../store/access";
-import { READ_ONLY, type ToolDeps, ok, runTool, citat, EXTERN_TEXT } from "./common";
+import { READ_ONLY, type ToolDeps, ok, runTool, citat, rad, EXTERN_TEXT } from "./common";
 import { type OpenIndex, viaIndex } from "./via_index";
 
 /** Högst så många geometrier hämtas per anrop till OGC API. */
@@ -356,11 +356,11 @@ function respondNara(q: NaraQuery, s: NaraSvar) {
 				: it.vaderstreck === null
 					? "0 m (punkten ligger på lämningen)"
 					: `${it.avstand_m} m ${it.vaderstreck}`;
-			const nr = [it.lamningsnummer, it.raa_nummer ? `(${it.raa_nummer})` : null].filter(Boolean).join(" ");
+			const nr = [rad(it.lamningsnummer), it.raa_nummer ? `(${rad(it.raa_nummer)})` : null].filter(Boolean).join(" ");
 			const namn = it.namn ? ` ${citat(it.namn)}` : "";
 			const osak = it.osakerhet_m ? `, lägesosäkerhet ${it.osakerhet_m} m` : "";
 			lines.push(
-				`${i + 1}. ${nr}${namn} – ${it.lamningstyp ?? "okänd typ"}, ${it.antikvarisk_bedomning ?? "bedömning saknas"}. ${lage}${osak}. ${it.url ?? ""}`.trim(),
+				`${i + 1}. ${nr}${namn} – ${rad(it.lamningstyp) || "okänd typ"}, ${rad(it.antikvarisk_bedomning) || "bedömning saknas"}. ${lage}${osak}. ${it.url ?? ""}`.trim(),
 			);
 		});
 	}

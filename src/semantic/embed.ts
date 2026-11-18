@@ -9,6 +9,10 @@
  * 3. inbäddningar för lämningar som utgått eller lämnat omfånget (vektorerna
  *    tas bort).
  *
+ * Fel i Workers AI: tillfälliga fel (arTillfalligtAiFel) prövas nästa körning
+ * utan att räknas; fel på en enskild text bokförs i inbaddning_fel, och efter
+ * MAX_FEL_PER_POST försök med samma radhash hoppas lämningen över.
+ *
  * För varje lämning byggs texten (text.ts) och metadata (filter.ts); är de
  * oförändrade (`innehall_hash`) bäddas inget in, bara `rad_hash` uppdateras.
  * Vektorerna skrivs till Vectorize före bokföringen i D1, så ett avbrott ger
@@ -36,6 +40,18 @@ export const MAX_FEL_PER_POST = 3;
 /** Så många misslyckade anrop till Workers AI per körning innan körningen ger upp (tjänsten är nere). */
 export const MAX_AI_FEL_PER_KORNING = 12;
 
+/**
+ * Tillfälligt fel i Workers AI (överbelastning, 5xx, 429, kvot, tidsgräns,
+ * nätverk) – inte fel på texten. Förbrukar inga försök i inbaddning_fel, och
+ * delen halveras inte (alla texter skulle falla av samma skäl).
+ */
+export function arTillfalligtAiFel(e: unknown): boolean {
+	const st = (e as { status?: unknown } | null)?.status;
+	if (typeof st === "number") return st === 429 || st >= 500;
+	const msg = e instanceof Error ? `${e.name} ${e.message}` : String(e);
+	return /\b(429|5\d\d)\b|time ?out|timed out|temporar|capacity|overload|rate.?limit|too many requests|quota|allocation|unavailable|upstream|network|fetch failed|ECONNRESET|internal (server )?error/i.test(msg);
+}
+
 export interface EmbedResult {
 	/** Lämningar som bäddades in (nya eller ändrade). */
 	inbaddade: number;
@@ -51,6 +67,8 @@ export interface EmbedResult {
 	klar: boolean;
 	/** Lämningar vars inbäddning fallerade i körningen (bokförda i inbaddning_fel). */
 	fel?: number;
+	/** Texter som inte bäddades in på grund av tillfälliga fel i Workers AI (prövas nästa körning). */
+	tillfalliga_fel?: number;
 	omfang: string[];
 }
 
@@ -348,6 +366,12 @@ export async function runEmbedBatch(
 				(fel as { cause?: unknown }).cause = e;
 				throw fel;
 			}
+			if (arTillfalligtAiFel(e)) {
+				// Inte textens fel: ingen bokföring i inbaddning_fel, ingen halvering. Lämningarna
+				// ligger kvar (i kön, eller utan inbäddning) och prövas nästa körning.
+				res.tillfalliga_fel = (res.tillfalliga_fel ?? 0) + del.length;
+				return [];
+			}
 			if (del.length === 1) {
 				felSatser.push(
 					db
@@ -391,7 +415,7 @@ export async function runEmbedBatch(
 	}
 
 	const koKvar = await rows<{ n: number }>(db, "SELECT count(*) AS n FROM inbaddning_ko");
-	res.klar = !nyaKvar && !gamlaKvar && Number(koKvar[0]?.n ?? 0) === 0 && !res.fel;
+	res.klar = !nyaKvar && !gamlaKvar && Number(koKvar[0]?.n ?? 0) === 0 && !res.fel && !res.tillfalliga_fel;
 	if (res.klar) await markeraKlar(db, signatur, tid);
 	return res;
 }

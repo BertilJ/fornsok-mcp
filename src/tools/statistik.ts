@@ -3,7 +3,7 @@ import { z } from "zod";
 import { strikt } from "./schema";
 import type { ResolvedSearchFilter } from "../sources/types";
 import { MAX_STATISTIK_RADER, STATISTIK_DIMENSIONER } from "../store/index";
-import { READ_ONLY, type ToolDeps, ok, runTool } from "./common";
+import { READ_ONLY, type ToolDeps, ok, rad, runTool } from "./common";
 import { describeFilter, filterShape, resolveEgenskaper, resolveFilter } from "./filter";
 import { indexOnly } from "./via_index";
 
@@ -91,7 +91,7 @@ export async function statistik(args: StatistikArgs, deps: ToolDeps) {
 		lines.push(
 			`${s.totalt} lämningar${villkor ? ` (${villkor})` : " i hela registret"}, per ${gruppera_pa.map((d) => NIVA_NAMN[d]).join(" och ")}. Källa: Lämningsindex (D1); ${ix.hamtad_fran}.`,
 		);
-		for (const g of s.grupper) lines.push(`- ${g.varden.join(" / ")}: ${g.antal}`);
+		for (const g of s.grupper) lines.push(`- ${g.varden.map(rad).join(" / ")}: ${g.antal}`);
 		if (s.totalt === 0) lines.push("Inga lämningar matchar filtret.");
 		for (const a of anmarkningar) lines.push(`Obs: ${a}`);
 		return ok(lines.join("\n"), structured);

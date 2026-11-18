@@ -185,7 +185,7 @@ describe.skipIf(!HAS_FALUN)(`Granskningens fynd mot Falu kommun ${HAS_FALUN ? ""
 		expect(plan[0]).toMatch(/^SCAN f VIRTUAL TABLE INDEX 0:M/);
 		// Rangordningen gäller fortfarande: samma som utan radie, begränsat till radien.
 		for (const h of r.traffar) expect(h.avstand_m).toBeLessThanOrEqual(3000);
-		expect(r.traffar.some((h) => h.utdrag?.includes("«och»"))).toBe(true);
+		expect(r.traffar.some((h) => h.utdrag?.includes("⟦och⟧"))).toBe(true);
 		const utan = await store.searchIndex({ fraga: "och" }, { antal: 100 });
 		const inom = new Set(r.traffar.map((h) => h.uuid));
 		expect(utan.totalt).toBeGreaterThanOrEqual(r.totalt);
@@ -228,7 +228,8 @@ describe.skipIf(!HAS_FALUN)(`Granskningens fynd mot Falu kommun ${HAS_FALUN ? ""
 		const withSnippet = queries.filter((q) => q.sql.includes("snippet("));
 		expect(withSnippet).toHaveLength(1);
 		expect(withSnippet[0].sql).toContain("l.id IN (SELECT value FROM json_each(?))");
-		expect(JSON.parse(String(withSnippet[0].params[0]))).toHaveLength(5);
+		// Parametrarna: tre par träffmarkörer (slumpade per fråga), sedan sidans id.
+		expect(JSON.parse(String(withSnippet[0].params[6]))).toHaveLength(5);
 		const ranked = queries.find((q) => /ORDER BY bm25/.test(q.sql) && /OFFSET/.test(q.sql));
 		expect(ranked?.sql).not.toContain("snippet(");
 		// Sidan är densamma som med den gamla metoden (rang, sedan id).

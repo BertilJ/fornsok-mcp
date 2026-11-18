@@ -21,6 +21,24 @@ export const FLODE_URL = "https://pub.raa.se/datauttag/lamningar";
 export const FLODE_SIDSTORLEK = 500;
 /** Högst så många sidor per intervall (skydd mot ett trasigt `totalPages`). */
 export const FLODE_MAX_SIDOR = 200;
+/** Största sidstorlek som flödet tillåter (OpenAPI-beskrivningen). */
+export const FLODE_MAX_STORLEK = 10_000;
+
+/**
+ * Intervallet har fler sidor än FLODE_MAX_SIDOR med den sidstorleken. Ingen
+ * post har lästs ut (trunkeras aldrig); anroparen delar intervallet eller
+ * höjer sidstorleken (src/sync/run.ts).
+ */
+export class ForMangaSidorError extends UpstreamError {
+	constructor(
+		message: string,
+		readonly totalPages: number,
+		readonly totalElements: number | null,
+	) {
+		super("raa_datauttag", message);
+		this.name = "ForMangaSidorError";
+	}
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATUM_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -131,14 +149,16 @@ export async function hamtaFlode(
 		}
 		totalPages = s.totalPages;
 		sida++;
-		if (s.last || s.poster.length === 0) break;
-		if (sida >= FLODE_MAX_SIDOR && sida < totalPages) {
-			// Trunkera aldrig tyst: då skulle markören flyttas förbi ändringar som inte lästs.
-			throw new UpstreamError(
-				"raa_datauttag",
-				`Ändringsflödet för ${fran}–${till} har ${totalPages} sidor, fler än ${FLODE_MAX_SIDOR} som läses per intervall; kortare intervall behövs`,
+		// Trunkera aldrig tyst: då skulle markören flyttas förbi ändringar som inte lästs.
+		// Syns det redan på första sidan avbryts det direkt, utan att resten läses.
+		if (!s.last && s.poster.length > 0 && totalPages > FLODE_MAX_SIDOR) {
+			throw new ForMangaSidorError(
+				`Ändringsflödet för ${fran}–${till} har ${totalPages} sidor, fler än ${FLODE_MAX_SIDOR} som läses per intervall; kortare intervall eller större sidor behövs`,
+				totalPages,
+				s.totalElements,
 			);
 		}
+		if (s.last || s.poster.length === 0) break;
 	}
 	return { poster: [...byUuid.values()], sidor: sida };
 }

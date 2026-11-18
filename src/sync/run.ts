@@ -34,12 +34,12 @@ import { checkedScope, inScope, type Scope } from "../semantic/scope";
 import { FornsokAppSource } from "../sources/fornsokapp/source";
 import { KsamsokSource } from "../sources/ksamsok/source";
 import type { Domaner } from "../sources/types";
-import { sparaKopiaSats } from "../lookup/index_domaner";
+import { KOPIA_NYCKEL, sparaKopiaSats } from "../lookup/index_domaner";
 import type { D1Like, D1LikeStatement } from "../store/d1";
 import { refreshInaktuella } from "../store/omraden";
 import { type FetchLike, UpstreamClient } from "../upstream/client";
 import { arDatum, dagarMellan, laggTillDagar, senasteKlaraDag, stockholmNu } from "./datum";
-import { FLODE_SIDSTORLEK, hamtaFlode } from "./flode";
+import { FLODE_MAX_SIDOR, FLODE_MAX_STORLEK, FLODE_SIDSTORLEK, ForMangaSidorError, hamtaFlode } from "./flode";
 import { OmradesRegister } from "./omraden";
 import {
 	appTillPost,
@@ -103,6 +103,8 @@ export interface SyncResult {
 }
 
 export const STATUS_SENAST = "senast_synkat";
+/** Nattsynken förnyar kopian av appens värdelistor när den är äldre än så här. */
+export const KOPIA_SYNK_ALDER_MS = 20 * 60 * 60 * 1000;
 export const STATUS_INTERVALL = "synk_intervall";
 export const STATUS_UTTAG_SETT = "synk_uttagsdatum_sett";
 
@@ -145,6 +147,16 @@ function statusSats(
 			"INSERT INTO synk_status (nyckel, varde, andrad) VALUES (?, ?, ?) ON CONFLICT(nyckel) DO UPDATE SET varde = excluded.varde, andrad = excluded.andrad",
 		)
 		.bind(nyckel, varde, tid);
+}
+
+/**
+ * Ogiltigt omfång: synken skriver utan att markera för inbäddning. Då tas
+ * inbäddningens klar-markering bort (src/semantic/embed.ts), så att nästa
+ * inbäddning med rättat omfång går igenom omfånget och hittar det som ändrats
+ * eller tagits bort under tiden (radhashen skiljer sig, vektorer utan lämning).
+ */
+function ogiltigforklaraInbaddning(db: D1Like): D1LikeStatement {
+	return db.prepare("DELETE FROM synk_status WHERE nyckel = 'inbaddning_klar'");
 }
 
 /** Markera för ny inbäddning om lämningen ligger inom omfånget eller redan är inbäddad. */
@@ -195,6 +207,7 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 	const ksamsok = new KsamsokSource(client);
 	let register: OmradesRegister | null = null;
 	const domaner = new KvDomainSource(app, env.CACHE);
+	let kopiaSparad = false;
 	const getRegister = async (): Promise<OmradesRegister> => {
 		if (!register) {
 			const d: Domaner = await domaner.loadDomaner();
@@ -202,6 +215,7 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 			// Spara listorna i D1, så att namnuppslaget klarar sig när appen är nere.
 			try {
 				await db.batch([sparaKopiaSats(db, d)]);
+				kopiaSparad = true;
 			} catch (e) {
 				console.warn("synk: värdelistorna kunde inte sparas i D1:", e instanceof Error ? e.message : String(e));
 			}
@@ -274,10 +288,25 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 			let till = senaste;
 			if (dagarMellan(fran, till) + 1 > maxDagar) till = laggTillDagar(fran, maxDagar - 1);
 			if (fran <= till) {
-				const flode = await hamtaFlode(client, fran, till, {
-					storlek: opts.sidstorlek ?? FLODE_SIDSTORLEK,
-					paus: () => sleep(pausMs),
-				});
+				// En mycket stor ändringsdag (fler sidor än FLODE_MAX_SIDOR): först en dag i
+				// taget, sedan större sidor (högst FLODE_MAX_STORLEK), i stället för att fastna.
+				let storlek = opts.sidstorlek ?? FLODE_SIDSTORLEK;
+				let flode: Awaited<ReturnType<typeof hamtaFlode>> | null = null;
+				while (!flode) {
+					try {
+						flode = await hamtaFlode(client, fran, till, { storlek, paus: () => sleep(pausMs) });
+					} catch (e) {
+						if (!(e instanceof ForMangaSidorError)) throw e;
+						if (till > fran) {
+							till = fran;
+							continue;
+						}
+						const behov = e.totalElements ? Math.ceil(e.totalElements / FLODE_MAX_SIDOR) : storlek * Math.ceil(e.totalPages / FLODE_MAX_SIDOR);
+						const ny = Math.min(FLODE_MAX_STORLEK, Math.max(storlek * 2, behov));
+						if (ny <= storlek) throw e;
+						storlek = ny;
+					}
+				}
 				const tid = startad;
 				const satser: D1LikeStatement[] = flode.poster.map((p) =>
 					db
@@ -338,7 +367,7 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 					0;
 				await db.batch([
 					...taBortSatser(db, k.uuid),
-					...(scope ? [markeraSats(db, k.uuid, "utgar", false, tid)] : []),
+					scope ? markeraSats(db, k.uuid, "utgar", false, tid) : ogiltigforklaraInbaddning(db),
 					taUr,
 				]);
 				if (fanns) res.borttagna++;
@@ -432,7 +461,7 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 				}
 				if (!ksFinns) {
 					const fanns = (await rows(db, "SELECT 1 AS x FROM lamning WHERE uuid = ?", k.uuid)).length > 0;
-					await db.batch([...taBortSatser(db, k.uuid), ...(scope ? [markeraSats(db, k.uuid, "saknas", false, tid)] : []), taUr]);
+					await db.batch([...taBortSatser(db, k.uuid), scope ? markeraSats(db, k.uuid, "saknas", false, tid) : ogiltigforklaraInbaddning(db), taUr]);
 					const msg = `${k.uuid}: finns varken i Fornsök-appen (404) eller K-samsök efter ${forsok} dagar; borttagen ur indexet`;
 					console.warn(`synk: ${msg}`);
 					res.fel.push(msg);
@@ -490,7 +519,7 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 				reg.kategorierFor(rad.rad.lamningstyp),
 				{ reserv },
 			);
-			if (scope) satser.push(markeraSats(db, k.uuid, fore.length ? "andrad" : "ny", iOmfang, tid));
+			satser.push(scope ? markeraSats(db, k.uuid, fore.length ? "andrad" : "ny", iOmfang, tid) : ogiltigforklaraInbaddning(db));
 			if (reserv) {
 				satser.push(
 					forsok >= maxForsok
@@ -518,6 +547,22 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 			if (o.omraknade || o.kvar) res.omraden = o;
 		} catch (e) {
 			res.fel.push(`områdenas sammanfattning kunde inte räknas om: ${e instanceof Error ? e.message : String(e)}`);
+		}
+
+		// ------------------------------------------------ 3c. värdelistorna
+		// Kopian av appens listor förnyas varje natt även utan ändringar (namnuppslaget
+		// läser den; src/lookup/index_domaner.ts). Via KV: högst en hämtning per dygn.
+		if (!kopiaSparad) {
+			try {
+				const k = await rows<{ hamtad: string }>(db, "SELECT hamtad FROM vardelista_kopia WHERE nyckel = ?", KOPIA_NYCKEL);
+				const alder = now.getTime() - Date.parse(k[0]?.hamtad ?? "");
+				if (!(alder < KOPIA_SYNK_ALDER_MS)) {
+					const d = await domaner.loadDomaner();
+					await db.batch([sparaKopiaSats(db, d)]);
+				}
+			} catch (e) {
+				res.fel.push(`värdelistorna kunde inte sparas i D1: ${e instanceof Error ? e.message : String(e)}`);
+			}
 		}
 
 		// ------------------------------------------------ 4. klart?

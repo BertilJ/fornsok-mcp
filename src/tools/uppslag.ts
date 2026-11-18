@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { strikt } from "./schema";
 import { LAN, normalizeName } from "../lookup/names";
-import { READ_ONLY, type ToolDeps, ok, runTool } from "./common";
+import { READ_ONLY, type ToolDeps, ok, rad, runTool } from "./common";
 import { viaIndex } from "./via_index";
 
 const LISTOR = ["lamningstyper", "kategorier", "bedomningar", "egenskapstyper", "kommuner", "socknar", "landskap", "lan"] as const;
@@ -125,16 +125,17 @@ export async function uppslag(args: UppslagArgs, deps: ToolDeps) {
 	const lines: string[] = [];
 	lines.push(`${args.lista}${args.sok ? ` som innehåller "${args.sok}"` : ""}: ${totalt} värden.`);
 	for (const v of shown) {
+		// Värdena kommer från registret och Fornsök-appen: rensas som annan extern text.
 		const extra = [
-			v.kod ? `kod ${v.kod}` : null,
-			v.kategori?.length ? v.kategori.join(", ") : null,
-			v.lan?.length ? `län ${v.lan.join("/")}` : null,
-			v.kommuner?.length ? `kommun ${v.kommuner.join(", ")}` : null,
+			v.kod ? `kod ${rad(v.kod)}` : null,
+			v.kategori?.length ? v.kategori.map(rad).join(", ") : null,
+			v.lan?.length ? `län ${v.lan.map(rad).join("/")}` : null,
+			v.kommuner?.length ? `kommun ${v.kommuner.map(rad).join(", ")}` : null,
 			v.aktiv === false ? "inaktiv" : null,
-			v.beskrivning ?? null,
+			v.beskrivning ? rad(v.beskrivning) : null,
 		].filter(Boolean);
 		if (v.typ !== undefined) extra.unshift(`${v.antal ?? 0} lämningar`);
-		lines.push(`- ${v.typ !== undefined ? `${v.typ}: ` : ""}${v.namn}${extra.length ? ` (${extra.join("; ")})` : ""}`);
+		lines.push(`- ${v.typ !== undefined ? `${rad(v.typ)}: ` : ""}${rad(v.namn)}${extra.length ? ` (${extra.join("; ")})` : ""}`);
 	}
 	if (anmarkning) lines.push(`Obs: ${anmarkning}`);
 	return ok(lines.join("\n"), structured);

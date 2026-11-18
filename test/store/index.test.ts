@@ -53,7 +53,7 @@ describe.skipIf(!HAS_FALUN)(`IndexStore mot Falu kommun ${HAS_FALUN ? "" : `(${S
 			url: "https://pub.raa.se/visa/objekt/lamning/adc490ba-871a-45bd-8e3d-0a27761b3b6c",
 			geometrityp: "Point",
 		});
-		expect(h.utdrag).toContain("«önskekälla»");
+		expect(h.utdrag).toContain("⟦önskekälla⟧");
 		expect(h.koordinat?.lat).toBeCloseTo(60.73368161435678, 6);
 		expect(h.koordinat?.lon).toBeCloseTo(15.456428761252013, 6);
 	});
@@ -66,7 +66,7 @@ describe.skipIf(!HAS_FALUN)(`IndexStore mot Falu kommun ${HAS_FALUN ? "" : `(${S
 		expect(prefix.sokord).toEqual(["hytt*"]);
 		// Typen väger tyngst: hyttområden först vid prefixsök.
 		expect(prefix.traffar[0].lamningstyp).toBe("Hyttområde");
-		for (const h of hytta.traffar) expect(h.utdrag).toMatch(/«[Hh]ytta»/);
+		for (const h of hytta.traffar) expect(h.utdrag).toMatch(/⟦[Hh]ytta⟧/);
 		// Utan stamning: "kalla" (utan ä) ger inget, "källa" något.
 		expect((await store.searchIndex({ fraga: "kalla" })).totalt).toBe(0);
 		expect((await store.searchIndex({ fraga: "källa" })).totalt).toBeGreaterThan(0);
@@ -239,7 +239,7 @@ describe.skipIf(!HAS_FALUN)(`IndexStore mot Falu kommun ${HAS_FALUN ? "" : `(${S
 			expect(h.utdrag).toBeTruthy();
 		}
 		// Träff i beskrivningen ger utdrag runt träffen.
-		expect(r.traffar.some((h) => /«[Gg]ruv/.test(h.utdrag ?? ""))).toBe(true);
+		expect(r.traffar.some((h) => /⟦[Gg]ruv/.test(h.utdrag ?? ""))).toBe(true);
 		const utanOrd = await store.searchIndex({ nara: { ...FALU_GRUVA, radie_m: 500 } }, { antal: 50 });
 		for (let i = 1; i < utanOrd.traffar.length; i++)
 			expect(utanOrd.traffar[i].avstand_m ?? 0).toBeGreaterThanOrEqual(utanOrd.traffar[i - 1].avstand_m ?? 0);

@@ -8,7 +8,7 @@ import { MODELL } from "../../src/semantic/bindings";
 import { AI_BATCH, embedStatus, runEmbedBatch } from "../../src/semantic/embed";
 import { createSemanticSearch, semanticSearch } from "../../src/semantic/search";
 import { runSync } from "../../src/sync/run";
-import { emptyDb, fakeRaa, flodePost, openD1, UUID } from "../sync/helpers";
+import { appFixture, emptyDb, fakeRaa, flodePost, openD1, UUID } from "../sync/helpers";
 import { FakeAi, FakeVectorize } from "./fakes";
 
 const STANDARDFRAS =
@@ -120,6 +120,51 @@ describe("runEmbedBatch", () => {
 			err.mockRestore();
 		}
 		expect((db.prepare("SELECT count(*) AS c FROM inbaddning_ko").get() as { c: number }).c).toBe(0);
+	});
+
+	it("felstavat SEMANTIC_LAN under en period: ändringar och borttagningar då bäddas in när inställningen rättas", async () => {
+		const raa = fakeRaa();
+		raa.flode.set("2026-11-11", [flodePost(UUID.L2001_646, "L2001:646", ["NY"]), flodePost(UUID.L2000_8802, "L2000:8802", ["NY"])]);
+		const o = (iso: string) => ({ now: new Date(iso), fetch: raa.fetch, sleep: async () => {}, pausMs: 0 });
+		await runSync({ DB: openD1(db), SEMANTIC_LAN: "Dalarna" }, o("2026-11-12T04:00:00Z"));
+		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 2, klar: true });
+		// Felperioden: en post ändras och en tas bort medan SEMANTIC_LAN är felstavat.
+		const ny = appFixture(UUID.L2001_646);
+		ny.beskrivning = "Offerkälla där man lagt mynt och nålar.";
+		raa.app.set(UUID.L2001_646, ny);
+		raa.flode.set("2026-11-12", [flodePost(UUID.L2001_646, "L2001:646", ["OVRIG_UPPDATERING"]), flodePost(UUID.L2000_8802, "L2000:8802", ["UTGAR"])]);
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const r = await runSync({ DB: openD1(db), SEMANTIC_LAN: "Dalarn" }, o("2026-11-13T04:00:00Z"));
+			expect(r).toMatchObject({ andrade: 1, borttagna: 1, markerade: 0 });
+		} finally {
+			err.mockRestore();
+		}
+		// Rättat till samma värde som förut: inbäddningen får inte säga "klar" utan att söka.
+		const e = await runEmbedBatch(env());
+		expect(e).toMatchObject({ inbaddade: 1, borttagna: 1, klar: true });
+		expect(vec.store.has(UUID.L2000_8802)).toBe(false);
+		const hits = await semanticSearch(env(), "mynt nålar offerkälla", { kommun: ["Falun"] }, 5);
+		expect(hits[0].uuid).toBe(UUID.L2001_646);
+	});
+
+	it("tillfälliga fel i Workers AI (5xx, tidsgräns, kvot) förbrukar inga försök och gör inte omfånget klart", async () => {
+		insertLamning(db, { uuid: uuidN(1), beskrivning: "Kolbotten, rund, 12 m diam." });
+		insertLamning(db, { uuid: uuidN(2), beskrivning: "Fångstgrop, rund, 3 m i diameter." });
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			for (const msg of ["AiError: 3040: Capacity temporarily exceeded, please try again.", "InferenceUpstreamError: 502 Bad Gateway", "Request timed out", "AiError: 3036: You have used up your daily free allocation (rate limit)"]) {
+				ai.run = async () => {
+					throw new Error(msg);
+				};
+				for (let k = 0; k < 4; k++) expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 0, klar: false });
+			}
+		} finally {
+			err.mockRestore();
+		}
+		expect(db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get()).toEqual({ n: 0 });
+		ai = new FakeAi();
+		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 2, klar: true });
 	});
 
 	it("bäddar in lämningar inom omfånget efter nattsynken, i delar som kan återupptas", async () => {

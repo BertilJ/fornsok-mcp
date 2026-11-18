@@ -1,0 +1,54 @@
+name: Kontrakttest mot RAÄ:s källor
+
+# Nattlig kontroll av att RAÄ:s tjänster fortfarande svarar i det format som
+# servern förutsätter (SPEC 10). Fornsök-appens läs-API är odokumenterat och kan
+# ändras utan förvarning. RAÄ:s nattliga uppdatering av GeoPackage-filerna är
+# klar före 05:00 UTC (filerna stämplas 03:40–04:45), därför körs testet efter det.
+on:
+  schedule:
+    - cron: "47 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Aldrig två körningar samtidigt mot RAÄ.
+concurrency:
+  group: kontrakt
+  cancel-in-progress: false
+
+jobs:
+  kontrakt:
+    name: Kontrakttester (cirka 25 anrop)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # actions/setup-node v7.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Installera beroenden
+        run: npm ci
+
+      - name: Sökvägar för rapport och anropslogg
+        run: |
+          echo "KONTRAKT_RAPPORT=$RUNNER_TEMP/kontrakt-rapport.json" >> "$GITHUB_ENV"
+          echo "KONTRAKT_LOGG=$RUNNER_TEMP/kontrakt-anrop.jsonl" >> "$GITHUB_ENV"
+
+      # Ett anrop i taget med paus, högst 32 anrop. Misslyckas steget blir körningen röd
+      # och GitHub mejlar förvarets ägare.
+      - name: Kontrakttester
+        run: npx vitest run --config vitest.kontrakt.config.mts
+
+      # Körs även om testerna misslyckades: säger vilken källa, vilket anrop och vilket fält
+      # som avviker, och skiljer "svarsformatet har ändrats" från "tjänsten svarar inte".
+      - name: Sammanfattning
+        if: ${{ !cancelled() }}
+        run: node test/kontrakt/sammanfatta.mjs | tee -a "$GITHUB_STEP_SUMMARY"

@@ -113,11 +113,13 @@ export function buildFilter(f: IndexSearchFilter): BuiltFilter {
 		if (!Array.isArray(f.socken) || f.socken.length > MAX_LIST) throw new IndexInputError(`socken: högst ${MAX_LIST} värden.`);
 		const s = f.socken
 			.filter((x) => x && typeof x.namn === "string" && x.namn.trim())
-			.map((x) => ({ namn: x.namn.normalize("NFC").trim(), lan: list("socken.lan", x.lan) ?? [] }));
+			.map((x) => ({ namn: x.namn.normalize("NFC").trim(), lan: list("socken.lan", x.lan) ?? [], kommun: list("socken.kommun", x.kommun) ?? [] }));
 		if (s.some((x) => x.namn.length > MAX_VALUE_LENGTH)) throw new IndexInputError("socken: för långt värde.");
 		if (s.length) {
 			// En socken utan län matchar alla socknar med namnet; med län bara socknar i de
 			// länen. Socknar med unikt namn har tomt län i indexet och matchar alltid.
+			// Med kommun (flera socknar med namnet i samma län, som indexet slagit ihop):
+			// bara socknens lämningar i de kommunerna.
 			// CROSS JOIN håller ordningen namn → omrade → lamning_omrade. Utan den valde
 			// planeraren att läsa alla socknars rader i lamning_omrade (780 000 i hela
 			// landet, 350 ms) och pröva namnet efteråt.
@@ -126,7 +128,9 @@ export function buildFilter(f: IndexSearchFilter): BuiltFilter {
 					`(SELECT lo.lamning_id FROM json_each(?) j
 					CROSS JOIN omrade o ON o.niva = 'socken' AND o.namn = json_extract(j.value, '$.namn')
 						AND (json_array_length(j.value, '$.lan') = 0 OR o.lan = '' OR o.lan IN (SELECT value FROM json_each(j.value, '$.lan')))
-					CROSS JOIN lamning_omrade lo ON lo.omrade_id = o.id)`,
+					CROSS JOIN lamning_omrade lo ON lo.omrade_id = o.id
+					WHERE json_array_length(j.value, '$.kommun') = 0 OR EXISTS (SELECT 1 FROM lamning_omrade lk JOIN omrade ok ON ok.id = lk.omrade_id
+						WHERE lk.lamning_id = lo.lamning_id AND ok.niva = 'kommun' AND ok.namn IN (SELECT value FROM json_each(j.value, '$.kommun'))))`,
 					[json(s)],
 				),
 			);

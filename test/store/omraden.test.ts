@@ -183,8 +183,11 @@ describe.skipIf(!HAS_FALUN)("områden mot Falu kommun", () => {
 			const ord = Array.from({ length: 18 }, (_, i) => `ord${i}`).join(" ");
 			const r = (await c.client.callTool({ name: "sok_lamningar", arguments: { fraga: ord, kommun: ["Falun"] } })).structuredContent as { anmarkningar: string[] };
 			expect(r.anmarkningar.join(" ")).toMatch(/fraga hade 18 ord; bara de 16 första användes/);
+			// Första namnuppslaget utan kopia hämtade appens listor och sparade dem i D1.
+			expect(raw.prepare("SELECT count(*) AS c FROM vardelista_kopia WHERE nyckel = ?").get(KOPIA_NYCKEL)).toEqual({ c: 1 });
 		} finally {
 			await c.client.close();
+			raw.prepare("DELETE FROM vardelista_kopia WHERE nyckel = ?").run(KOPIA_NYCKEL);
 		}
 	});
 
