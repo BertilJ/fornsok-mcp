@@ -1,9 +1,67 @@
 # Fornsök MCP – specifikation
 
-Status: utkast 3, 2026-11-17. Inget är byggt.
-Utgår från din förlaga (K-samsök-brygga på Cloudflare Workers, tre verktyg) och målet "bästa möjliga lösning på Cloudflare, betald plan", utan märkbar merkostnad. Beslut står i avsnitt 12.
+Status: byggt och i drift sedan 2026-11-18. Avsnitt 0 beskriver det som faktiskt finns; avsnitt 1–15 är planen som bygget utgick från och har inte skrivits om i efterhand. Där de skiljer sig gäller avsnitt 0 och `README.md`.
 
-Märkning: **[V]** = verifierat med riktiga anrop 2026-11-17, **[D]** = enligt dokumentation, inte provkört, **[A]** = antagande som ska kontrolleras vid bygget.
+Märkning: **[V]** = verifierat med riktiga anrop, **[D]** = enligt dokumentation, inte provkört, **[A]** = antagande som ska kontrolleras vid bygget.
+
+---
+
+## 0. Läget 2026-11-18
+
+### Byggt och i drift
+
+| Del | Läge |
+|---|---|
+| Server | Cloudflare Worker bakom Cloudflare Access, tillståndslös MCP över Streamable HTTP. Kopplingen från claude.ai är prövad av ägaren **[V]** |
+| Inloggning | Passkey eller engångskod via e-post, Managed OAuth mot MCP-klienter. Workern verifierar Access-intyget på varje anrop |
+| Verktyg (nio) | `sok_lamningar`, `lamningar_nara`, `lamning`, `lamning_dokument`, `hamta_dokument`, `relaterat`, `statistik`, `uppslag`, `hitta_plats` |
+| Index | Hela landet i D1: 766 389 lämningar, laddat ur GeoPackage 2026-11-17 **[V]** |
+| Semantisk sökning | Dalarnas län, 32 743 lämningar inbäddade med `@cf/baai/bge-m3` i Vectorize **[V]** |
+| Nattsynk | Körs 04:40 svensk vintertid mot RAÄ:s ändringsflöde; första körningen hämtade 99 poster utan fel **[V]** |
+| Kontraktstester | Nattligen på GitHub mot RAÄ:s riktiga tjänster, cirka 26 läsanrop; körda lokalt **[V]** |
+| CI | Typkontroll, lint och tester vid varje push **[V]** |
+
+### Avvikelser från planen
+
+| Planen | Blev |
+|---|---|
+| Rumsligt index med R\*Tree (5.2) | Indexerade kolumner för omslutande ruta, uppdelade i höjdklasser. D1:s dokumentation nämner inte R\*Tree |
+| Inläsning och inbäddning som Cloudflare Workflow (5.3) | Schemalagda körningar (Cron) i delar, med lås mot överlapp |
+| Landskap ur GeoPackage | GeoPackage saknar landskap; kopplingen socken → landskap byggdes en gång ur K-samsök och ligger i `ingest/data/referens.json` |
+| `hitta_plats` frågar OpenStreetMap bara om indexet inte ger något (6) | Frågar också när träffen är en socken eller kommun, så att själva orten visas. Varje träff säger vilken sorts punkt den är. Inga omförsök mot OpenStreetMap, och spärr i tio minuter vid fel |
+| Jämförelse av två inbäddningsmodeller (5.2) | Inte gjord; `bge-m3` valdes direkt |
+| Sökkvalitetstest med 30 svenska frågor (10) | Inte gjort |
+| Sökträffar markerade inom «» | Källtext ramas in med «…», träffar markeras med ⟦…⟧, och text ur externa källor rensas från osynliga tecken och styrtecken |
+| Namnuppslag mot Fornsök-appens värdelistor | Mot indexet, med en sparad kopia av appens listor som förnyas högst en gång per dygn |
+| `relaterat` planerad som senare del | Byggt: hämtar även material kopplat till lämningens äldre FMI-post |
+
+### Gränser som verktygen har
+
+- Okända parametrar ger fel i stället för att strykas.
+- Ordsökningen har ingen stamning; prefix med `*` stöds. Ord med fler än 150 000 träffar rangordnas inte efter relevans.
+- `statistik` i två nivåer tillåter högst 400 000 lämningar, eller 200 000 med områdes- eller egenskapsfilter.
+- `relaterat` slår upp högst 120 objekt i taget och hämtar högst 2 000 via sökning; resten visas med bara relation och adress.
+- `hamta_dokument` returnerar JPEG och PNG upp till 2 MB som bild; PDF och större filer som länk.
+- Semantisk sökning används bara när frågans geografiska filter ligger inom Dalarnas län.
+
+### Inte byggt
+
+- Arkeologiska uppdrag (`sok_uppdrag`, `uppdrag`) och karta i samtalet.
+- Klassningen av museiföremål i `relaterat` är oprövad mot riktiga data; inga sådana relationer hittades.
+
+### Oprövat mot riktiga tjänster
+
+- Begränsningen av anrop per användare (bara prövad med en låtsasbindning).
+- Hur inbäddningen beter sig vid ett verkligt avbrott hos Workers AI.
+- Spärren mot OpenStreetMap vid ett verkligt felsvar.
+- Den månatliga avstämningen mot en ny GeoPackage (verktyget finns i `ingest/`, men ingen avstämning har körts).
+
+### Återstår för ägaren
+
+- Återkalla den tillfälliga Cloudflare-token som användes vid uppsättningen (avsnitt 14).
+- Skicka informationen till RAÄ om användningen av Fornsök-appens läs-API (9.1).
+- Köra avstämningen mot en ny GeoPackage ungefär en gång i månaden.
+- Hålla förvaret aktivt eller slå på den nattliga kontrollen igen: GitHub stänger av schemalagda körningar efter 60 dagar utan aktivitet.
 
 ---
 
@@ -235,7 +293,7 @@ OpenStreetMap är ojämnt för torp, fäbodar och äldre gruvnamn. För sådana 
 ### Senare
 | Verktyg | Källa | Återstår att utreda |
 |---|---|---|
-| `relaterat` – foton, arkivhandlingar, föremål | K-samsök `getRelations` **[V]** | Vilka relationstyper som är värda att visa |
+| `relaterat` – foton, arkivhandlingar, föremål | K-samsök `getRelations` **[V]** | Byggt 2026-11-18, se avsnitt 0 |
 | `sok_uppdrag`, `uppdrag` – arkeologiska uppdrag och rapporter | Fornsök-appen, egna GeoPackage för uppdrag | Sökparametrarna är inte kartlagda |
 | `karta` – interaktiv karta i samtalet | MCP Apps, `@modelcontextprotocol/ext-apps` 2.0.4 **[D]** | Klientstöd |
 
