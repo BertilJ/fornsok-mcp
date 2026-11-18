@@ -13,9 +13,9 @@ Projektet är under uppbyggnad (etapp 4–6). Sökning, närhetssök, statistik 
 | `lamning` | Hela posten för 1–10 lämningar, på lämningsnummer, RAÄ-nummer, UUID eller K-samsök-URI. Grundposten ur indexet; valfritt med geometri (GeoJSON), referenser, dokument (med `dokument_ref`) och versionshistorik, som hämtas från Fornsök-appen. Ett RAÄ-nummer som delas av flera lämningar ger alla. |
 | `lamning_dokument` | Dokumenten för en lämning: inventeringsboksuppslag, händelseloggar, bilder och maritim dokumentation, var och en med en `dokument_ref`. |
 | `hamta_dokument` | Hämtar ett dokument via `dokument_ref`. JPEG och PNG upp till 2 MB kommer som bild i svaret (så att en inventeringsbokssida kan läsas direkt); större filer och PDF som länk med metadata. |
-| `statistik` | Antal lämningar per lämningstyp, kategori, bedömning, län, kommun, socken eller landskap, i en eller två nivåer, med samma filter som `sok_lamningar`. Högst 200 rader. Kräver indexet. |
+| `statistik` | Antal lämningar per lämningstyp, kategori, bedömning, län, kommun, socken eller landskap, i en eller två nivåer, med samma filter som `sok_lamningar`. Högst 200 rader. En nivå utan filter går för hela landet (ur förberäknade tabeller); grupperingar som måste räknas lämning för lämning görs för högst 150 000 lämningar (en nivå) respektive 50 000 (två nivåer), annars ett fel som ber om ett filter. Kräver indexet. |
 | `uppslag` | Värdelistor: lämningstyper med kategori, kategorier, bedömningar, egenskapstyper med värden och antal (ur indexet), kommuner, socknar, landskap och län. |
-| `hitta_plats` | Ortnamn till koordinat: först socknar, kommuner och namngivna lämningar i indexet, sedan OpenStreetMap Nominatim (bara Sverige, högst ett anrop per sekund, svar sparas 30 dygn). Koordinaten kan skickas till `lamningar_nara`. |
+| `hitta_plats` | Ortnamn till koordinat: först socknar, kommuner (förberäknad mittpunkt, migrering 0003) och namngivna lämningar (ordsök i namnet) i indexet, sedan OpenStreetMap Nominatim (bara Sverige, högst ett anrop per sekund, svar sparas 30 dygn). Koordinaten kan skickas till `lamningar_nara`. |
 
 Alla verktyg är läsande. Svaren har både läsbar text och `structuredContent` enligt ett `outputSchema`. Namn på kommuner, socknar, typer, län och egenskaper slås upp skiftlägesokänsligt; okända namn ger ett fel med närmaste förslag, och en socken som finns i flera län ger en lista att välja ur.
 
@@ -52,6 +52,10 @@ Utan `DB` görs ingenting; utan `AI` eller `VECTORIZE` ingen inbäddning. Ett fe
 | Ingen `DB`-bindning, tomt index eller fel i ett indexanrop | K-samsök | OGC API Features | Fornsök-appen, K-samsök som reserv | Tydligt fel |
 
 `hamtad_fran` säger varifrån svaret kom och hur färskt det är: `index 2026-11-17` (GeoPackage-uttagets datum, eller nattsynkens datum `synk_status.senast_synkat` när det är senare), eller t.ex. `K-samsök (reservläge: indexet är tomt (inte laddat)), data byggd 2026-11-14`. `reservlage: true` och en anmärkning märker svaret. Efter ett fel i ett indexanrop används reserven i 15 sekunder innan indexet prövas igen; läget (laddat, datum) kontrolleras högst en gång per minut och isolat.
+
+Namnuppslaget (kommun, socken, län, landskap, lämningstyp, kategori) går i första hand mot indexet: Fornsök-appens värdelistor som nattsynken sparar i D1 (`vardelista_kopia`), kompletterade med de namn som finns i indexet, eller – innan någon kopia finns – listor byggda direkt ur indexet (`omrade`, `lamningstyp_kategori`, lämningstyperna). Appens listor (KV-cachade) är reserv om indexet inte svarar, och för namn som saknas i indexets listor. Sökningen fungerar alltså när appen är nere.
+
+Mycket vanliga ord (fler än 150 000 träffar, t.ex. "och") rangordnas inte med bm25 utan visas i indexets ordning, och svaret säger det; detsamma gäller sortering på lämningsnummer utan sökord. Mätningar mot hela landet: `node scripts/matning.ts` (se kommentaren i filen).
 
 I mycket täta områden prövas högst 5 000 kandidater med exakt avstånd, de närmaste först; svaret anger då radien inom vilken det är fullständigt. Högst 10 000 träffar går att bläddra till (`nabara`).
 
@@ -98,7 +102,7 @@ Utan D1-bindning går allt mot de levande källorna (reservläge). Med ett lokal
 ```bash
 curl -fo ingest/.cache/falun.gpkg 'https://pub.raa.se/nedladdning/datauttag/lamningar_v1/kommun/l%c3%a4mningar_kommun_falun.gpkg'
 npm run ingest -- sql ingest/.cache/falun.gpkg --ut ingest/out/falun
-npx wrangler d1 migrations apply fornsok --local -c <din lokala konfiguration>   # 0001 och 0002
+npx wrangler d1 migrations apply fornsok --local -c <din lokala konfiguration>   # 0001–0003
 for f in ingest/out/falun/*.sql; do npx wrangler d1 execute fornsok --local -c <din lokala konfiguration> --file "$f" -y; done
 npx wrangler dev -c <din lokala konfiguration>
 ```
@@ -108,7 +112,8 @@ Prova med en MCP-klient, till exempel MCP Inspector mot `http://localhost:8787/m
 ```bash
 node scripts/smoke.mjs http://localhost:8787/mcp
 node scripts/smoke.mjs --index http://localhost:8787/mcp             # med lokalt index (Falun)
-node scripts/smoke.mjs --index --semantisk <url>                    # mot driftsatt server med AI/Vectorize
+node scripts/smoke.mjs --index <url>                                # upptäcker den semantiska kanalen ur svaret (sokkanaler)
+node scripts/smoke.mjs --index --semantisk <url>                    # kräver dessutom att kanalen är ansluten
 node scripts/smoke.mjs --utan-inloggning http://localhost:8787/mcp   # utan .dev.vars: allt ska ge 401
 ```
 
@@ -116,6 +121,8 @@ Tester och typkontroll:
 
 ```bash
 npm test               # vitest, mot inspelade svar i test/fixtures – inga nätverksanrop
+                       # (ett incheckat urval om 300 lämningar testar indexvägarna alltid; Falu kommun
+                       #  och hela landet i ingest/.cache/ är valfria och hoppas över om filerna saknas)
 npm run type-check     # src/, test/ och ingest/
 ```
 
@@ -134,7 +141,17 @@ Den spårade `wrangler.jsonc` är för lokal utveckling och saknar medvetet allt
 1. Kopiera `wrangler.local.example.jsonc` till `wrangler.local.jsonc` (ospårad, står i `.gitignore`) och fyll i alla platshållare: konto-id, värdnamn (Workers Custom Domain), kontaktväg, Access-teamdomän och AUD-tagg, ett `namespace_id` för begränsningen, samt id:n för KV (och D1/Vectorize, som används från en senare etapp).
 2. `npx wrangler deploy -c wrangler.local.jsonc`
 
-`workers_dev` och förhandsadresser är avstängda, så Workern nås bara via den egna domänen bakom Access. `DB` är indexet; utan det går servern i reservläge mot de levande källorna. `VECTORIZE` och `AI` ger semantisk sökning. Utan `CACHE` cachas bara i minnet. Migreringarna (`migrations/0001_init.sql`, `0002_synk_semantik.sql`) körs med `npx wrangler d1 migrations apply <databas> --remote -c wrangler.local.jsonc`.
+`workers_dev` och förhandsadresser är avstängda, så Workern nås bara via den egna domänen bakom Access. `DB` är indexet; utan det går servern i reservläge mot de levande källorna. `VECTORIZE` och `AI` ger semantisk sökning. Utan `CACHE` cachas bara i minnet. Migreringarna (`migrations/0001_init.sql`, `0002_synk_semantik.sql`, `0003_omraden.sql`) körs med `npx wrangler d1 migrations apply <databas> --remote -c wrangler.local.jsonc`, **före** driftsättning av koden som använder dem.
+
+`0003_omraden.sql` skapar tabellerna för förberäknade områden (`omrade_sammanfattning`, `omrade_relation`, `niva_sammanfattning`), kopian av appens värdelistor (`vardelista_kopia`) och felbokföringen för inbäddning (`inbaddning_fel`), och fyller områdestabellerna ur `lamning_omrade` – mot en redan laddad databas, utan omladdning. Omräkningen är uppdelad i 34 satser (per nivå, i fyra delar), som var och en läser högst cirka 200 000 rader; mot hela landet tar den lokalt 15 s sammanlagt och högst 0,9 s per sats. Satserna räknar bara det som saknas, så en avbruten körning kan köras om. Stryps `migrations apply` av D1 (30 s per fråga, strypning vid mycket arbete inom 10 s), kör satserna en i taget:
+
+```bash
+node scripts/dela-migrering.mjs migrations/0003_omraden.sql /tmp/0003
+for f in /tmp/0003/*.sql; do npx wrangler d1 execute <databas> --remote -c wrangler.local.jsonc --file "$f" -y || break; sleep 5; done
+npx wrangler d1 migrations apply <databas> --remote -c wrangler.local.jsonc   # bokför 0003; satserna hoppar över det som redan finns
+```
+
+Inläsningen räknar om områdestabellerna helt sist i varje körning, och nattsynken räknar om de områden som en skriven eller borttagen lämning ligger i.
 
 Indexet laddas från din dator (se kommentaren överst i `ingest/cli.ts`): `npm run ingest -- sql <fil.gpkg> --ut <katalog>` skriver idempotenta SQL-filer som körs med `wrangler d1 execute --remote --file`. Inläsningen stämmer av antalet rader mot källfilen och avbryter med fel om någon lämning tappats.
 
@@ -183,9 +200,12 @@ ingest/                 Inläsning av GeoPackage till indexet (Node 22, körs me
 migrations/             D1-schemat
 test/                   vitest; inspelade svar under test/fixtures, indexet mot Falu kommun
 scripts/smoke.mjs       Röktest mot en körande server (även --utan-inloggning)
+scripts/matning.ts      Mätning av indexets frågor mot en lokal laddning av hela landet
+scripts/dela-migrering.mjs  Delar en migrering i en fil per sats (för D1:s gränser)
+scripts/bygg-testurval.mjs  Bygger det incheckade testurvalet (test/fixtures/falun-urval.sql)
 wrangler.local.example.jsonc  Mall för driftkonfigurationen (platshållare)
 ```
 
 ## Licens
 
-Ingen licens är vald än; tills vidare gäller full upphovsrätt för koden. Registerdata från RAÄ, även de inspelade testsvaren, är CC0.
+Koden är MIT-licensierad (se `LICENSE`). Registerdata från RAÄ, även de inspelade testsvaren, är CC0 och omfattas inte av MIT-licensen.

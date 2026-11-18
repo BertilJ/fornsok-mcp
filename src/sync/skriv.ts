@@ -16,6 +16,7 @@
  * avbruten körning antingen har skrivit allt för lämningen eller inget.
  */
 import type { D1Like, D1LikeStatement } from "../store/d1";
+import { markeraOmradenSats } from "../store/omraden";
 import type { Omrade } from "./omraden";
 import { LAMNING_KOLUMNER, type Rad } from "./rad";
 
@@ -96,7 +97,8 @@ export function skrivSatser(
 			.bind(...LAMNING_KOLUMNER.map((c) => r.rad[c] ?? null)),
 	);
 
-	// 3. Barnrader raderas …
+	// 3. Barnrader raderas … (områdena lämningen låg i markeras först för omräkning, se src/store/omraden.ts)
+	out.push(markeraOmradenSats(db, uuid));
 	out.push(...raderaBarn(db, uuid, !reserv));
 
 	// 4. … och skrivs om.
@@ -109,6 +111,8 @@ export function skrivSatser(
 				.bind(...part.flatMap((o) => [o.niva, o.namn, o.lan]), uuid),
 		);
 	}
+	// … och de områden den ligger i nu markeras.
+	out.push(markeraOmradenSats(db, uuid));
 	if (!reserv) {
 		for (const part of chunks(r.egenskaper, Math.floor((MAX_PARAMS - 1) / 3))) {
 			out.push(
@@ -148,6 +152,7 @@ export function skrivSatser(
 /** Ta bort lämningen helt (UTGAR). Delete-triggern tar bort texten ur FTS-indexet. */
 export function taBortSatser(db: D1Like, uuid: string): D1LikeStatement[] {
 	return [
+		markeraOmradenSats(db, uuid),
 		...raderaBarn(db, uuid, true),
 		db.prepare("DELETE FROM lamning WHERE uuid = ?").bind(uuid),
 	];

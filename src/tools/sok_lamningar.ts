@@ -1,13 +1,16 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { strikt } from "./schema";
 import { publicUrl } from "../config";
 import { ToolInputError } from "../errors";
 import { round, toPlanar } from "../geo/sweref";
 import { reciprocalRankFusion } from "../search/fusion";
+import { tillVectorizeFilter } from "../semantic/filter";
 import type { ResolvedSearchFilter, SearchHit, SemanticHit } from "../sources/types";
 import { reservHamtadFran } from "../store/access";
-import type { IndexHit } from "../store/index";
-import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, fmtCoord, list, ok, runTool } from "./common";
+import { type IndexHit, MAX_RANKAD } from "../store/index";
+import { MAX_TERMS, tokenize } from "../store/fts";
+import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, citat, fmtCoord, list, ok, runTool, EXTERN_TEXT } from "./common";
 import { type ResolvedFilter, describeFilter, filterShape, hasCriteria, resolveEgenskaper, resolveFilter, toKsamsokFilter } from "./filter";
 import { makeUtdrag } from "./utdrag";
 import { type OpenIndex, viaIndex } from "./via_index";
@@ -23,7 +26,7 @@ export const HYBRID_MIN_DEPTH = 100;
 /** Sammanslagen rangordning räcker till hit; sidor bortom den ges av ordsök ensam. */
 export const HYBRID_MAX_DEPTH = 1000;
 
-export const sokInput = z.object({
+export const sokInput = strikt("sok_lamningar", {
 	fraga: filterShape.fraga,
 	lage: z
 		.enum(["auto", "ord", "betydelse"])
@@ -56,6 +59,8 @@ export const sokOutput = z.object({
 	sida: z.number().int(),
 	antal: z.number().int(),
 	sokkanaler: z.array(kanal),
+	/** När den semantiska kanalen användes: hur stor del av omfånget som är inbäddat. */
+	semantisk_tackning: z.object({ inbaddade: z.number().int(), i_omfang: z.number().int(), fullstandig: z.boolean() }).optional(),
 	/** Ord som söktes (efter uppdelning; `*` = prefix). */
 	sokord: z.array(z.string()).optional(),
 	kalla: z.string(),
@@ -108,7 +113,7 @@ export function registerSokLamningar(server: McpServer, deps: ToolDeps): void {
 				"Kombinera fritext med filter på nummer, lämningstyp, kategori, antikvarisk bedömning, kommun, socken, landskap, län, egenskap och område (nara, med avstånd till geometrin). " +
 				"Alla ord i `fraga` måste finnas (OCH); ingen stamning, men `*` sist i ett ord ger prefixsökning. Ger nummer, typ, bedömning, indelning, koordinat, utdrag runt träffen och länk. " +
 				"Söker i serverns eget index (uppdateras nattligen); inom det semantiska omfånget (Dalarnas län) också på frågans innebörd (se lage). Om indexet inte är tillgängligt går sökningen mot K-samsök och svaret märks som reservläge. " +
-				"För närmaste lämningar runt en punkt, använd lamningar_nara; för antal per grupp, statistik; för hela posten, lamning.",
+				"För närmaste lämningar runt en punkt, använd lamningar_nara; för antal per grupp, statistik; för hela posten, lamning." + EXTERN_TEXT,
 			inputSchema: sokInput,
 			outputSchema: sokOutput,
 			annotations: { ...READ_ONLY, title: "Sök lämningar" },
@@ -141,6 +146,8 @@ export async function sokLamningar(args: SokArgs, deps: ToolDeps) {
 
 interface IndexResult {
 	totalt: number;
+	/** false: fler träffar än som rangordnas; ordningen är indexets. */
+	rangordnad?: boolean;
 	nabara?: number;
 	totalt_ungefar: boolean;
 	traffar: Array<IndexHit & { kanaler?: Kanal[] }>;
@@ -151,6 +158,9 @@ interface IndexResult {
 async function sokIndex(args: SokArgs, r: ResolvedFilter, ix: OpenIndex, deps: ToolDeps) {
 	const anmarkningar = [...r.anmarkningar];
 	const filter: ResolvedSearchFilter = { ...r.filter };
+	const antalOrd = tokenize(r.ord.join(" ")).length;
+	if (r.ord.length > MAX_TERMS && antalOrd >= MAX_TERMS)
+		anmarkningar.push(`fraga hade ${r.ord.length} ord; bara de ${MAX_TERMS} första användes i ordsökningen. Alla ord måste finnas i posten, så färre ord ger oftast fler träffar.`);
 	if (filter.egenskap?.length) filter.egenskap = resolveEgenskaper(filter.egenskap, await deps.index!.egenskaper());
 	const store = ix.store;
 	const offset = (args.sida - 1) * args.antal;
@@ -167,14 +177,18 @@ async function sokIndex(args: SokArgs, r: ResolvedFilter, ix: OpenIndex, deps: T
 			);
 		}
 		let hits: SemanticHit[];
+		const semFilter = await semantisktFilter(filter, deps, store, anmarkningar);
 		try {
-			hits = await semantic.search(text, filter, SEMANTIC_TOP_K);
+			hits = await semantic.search(text, semFilter, SEMANTIC_TOP_K);
 		} catch (err) {
 			console.error("semantisk sökning:", err);
 			throw new ToolInputError('Den semantiska sökningen svarade inte. Försök igen om en stund, eller använd lage "ord".');
 		}
 		const passing = await filterSemantic(store, hits, filter, new Set());
 		if (offset + args.antal > SEMANTIC_TOP_K) anmarkningar.push(`Semantisk sökning ger högst ${SEMANTIC_TOP_K} träffar.`);
+		anmarkningar.push(
+			`Läge "betydelse": totalen är antalet av de ${SEMANTIC_TOP_K} semantiskt närmaste lämningarna som uppfyller filtret, inte alla relevanta. Orden i fraga används som fråga, inte som krav på att orden ska finnas.`,
+		);
 		const page = passing.slice(offset, offset + args.antal);
 		const byUuid = await store.hitsByUuids(page, filter);
 		res = {
@@ -189,13 +203,14 @@ async function sokIndex(args: SokArgs, r: ResolvedFilter, ix: OpenIndex, deps: T
 		if (need > HYBRID_MAX_DEPTH) {
 			anmarkningar.push(`Sidor bortom träff ${HYBRID_MAX_DEPTH} rangordnas bara med ordsök.`);
 		} else {
-			res = await hybrid(store, semantic, text, filter, offset, args.antal, anmarkningar);
+			res = await hybrid(store, semantic, text, filter, await semantisktFilter(filter, deps, store, anmarkningar), offset, args.antal, anmarkningar);
 		}
 	}
 	if (!res) {
 		const page = await store.searchIndex(filter, { antal: args.antal, sida: args.sida });
 		res = {
 			totalt: page.totalt,
+			rangordnad: page.rangordnad !== false,
 			nabara: page.nabara,
 			totalt_ungefar: !!page.totalt_ungefar,
 			traffar: page.traffar,
@@ -203,7 +218,26 @@ async function sokIndex(args: SokArgs, r: ResolvedFilter, ix: OpenIndex, deps: T
 			sokord: page.sokord,
 		};
 	}
+	// Den semantiska kanalen användes: säg om omfånget inte är färdiginbäddat.
+	let semantisk_tackning: { inbaddade: number; i_omfang: number; fullstandig: boolean } | undefined;
+	if (semantic?.lan?.length && res.sokkanaler.includes("betydelse")) {
+		try {
+			semantisk_tackning = await deps.index!.inbaddning(semantic.lan);
+			if (!semantisk_tackning.fullstandig) {
+				const pct = semantisk_tackning.i_omfang ? Math.floor((100 * semantisk_tackning.inbaddade) / semantisk_tackning.i_omfang) : 0;
+				anmarkningar.push(
+					`Den semantiska kanalen är ansluten, men ${semantic.omfang ?? "omfånget"} är ännu bara inbäddat till ${pct} % (${semantisk_tackning.inbaddade} av ${semantisk_tackning.i_omfang} lämningar); semantiska träffar kan saknas tills inbäddningen är klar.`,
+				);
+			}
+		} catch (err) {
+			console.warn("semantik: inbäddningsläget gick inte att läsa:", err instanceof Error ? err.message : String(err));
+		}
+	}
 	if (res.totalt_ungefar) anmarkningar.push("Totalen är ungefärlig (många kandidater i området, eller sammanslagen rangordning).");
+	if (res.rangordnad === false)
+		anmarkningar.push(
+			`Frågan ger ${res.totalt} träffar, fler än ${MAX_RANKAD} som går att ${filter.ord?.length ? "rangordna efter relevans" : "sortera på lämningsnummer"} i rimlig tid; träffarna visas i indexets ordning. Lägg till fler ord eller filter (t.ex. kommun, typ) för en rangordnad lista.`,
+		);
 
 	const traffar: Traff[] = res.traffar.map((h) => ({
 		lamningsnummer: h.lamningsnummer,
@@ -227,6 +261,7 @@ async function sokIndex(args: SokArgs, r: ResolvedFilter, ix: OpenIndex, deps: T
 	}));
 
 	return respond(args, {
+		...(semantisk_tackning ? { semantisk_tackning } : {}),
 		totalt: res.totalt,
 		nabara: res.nabara ?? (res.sokkanaler.includes("betydelse") ? Math.min(res.totalt, res.sokkanaler.length > 1 ? HYBRID_MAX_DEPTH : SEMANTIC_TOP_K) : res.totalt),
 		totalt_ungefar: res.totalt_ungefar,
@@ -236,7 +271,8 @@ async function sokIndex(args: SokArgs, r: ResolvedFilter, ix: OpenIndex, deps: T
 		hamtad_fran: ix.hamtad_fran,
 		reservlage: false,
 		data_byggd: ix.status.uttagsdatum,
-		filter,
+		// I läge betydelse filtrerar orden inte (de är frågan): visa dem inte som tillämpat villkor.
+		filter: args.lage === "betydelse" ? (({ ord: _o, ...rest }) => rest)(filter) : filter,
 		kategorier: r.kategorier,
 		traffar,
 		anmarkningar,
@@ -252,14 +288,18 @@ async function hybrid(
 	semantic: NonNullable<ToolDeps["semantic"]>,
 	text: string,
 	filter: ResolvedSearchFilter,
+	semFilter: ResolvedSearchFilter,
 	offset: number,
 	antal: number,
 	anmarkningar: string[],
 ): Promise<IndexResult | null> {
-	const depth = Math.max(HYBRID_MIN_DEPTH, offset + antal);
+	// Fast djup: samma ordlista för alla sidor, så att sammanslagningen ger samma
+	// ordning från sida till sida (med djup efter sidan kunde träffar hoppa eller
+	// upprepas kring träff 100).
+	const depth = HYBRID_MAX_DEPTH;
 	const [ord, sem] = await Promise.all([
 		store.searchRanked(filter, depth),
-		semantic.search(text, filter, SEMANTIC_TOP_K).then(
+		semantic.search(text, semFilter, SEMANTIC_TOP_K).then(
 			(h) => h,
 			(err: unknown) => {
 				console.error("semantisk sökning:", err);
@@ -289,12 +329,51 @@ async function hybrid(
 		return [{ ...h, kanaler }];
 	});
 	return {
+		rangordnad: ord.rangordnad !== false,
 		totalt: ord.totalt + semOnly,
 		totalt_ungefar: !!ord.totalt_ungefar || (semOnly > 0 && ord.totalt > ordIds.length),
 		traffar,
 		sokkanaler: ["ord", "betydelse"],
 		sokord: ord.sokord,
 	};
+}
+
+/**
+ * Filtret för den semantiska kanalen. Vectorize kan bara filtrera på typ,
+ * bedömning och område; övrigt prövas i D1 på de högst 100 semantiska
+ * träffarna, som då kan bli få eller inga. Därför översätts det som går:
+ * - kategori → kategorins lämningstyper (om ingen lämningstyp angavs),
+ * - nara → socknarna (eller kommunerna) som har lämningar inom radien.
+ * Det som ändå inte kan tillämpas före likhetssökningen sägs i anmärkningarna.
+ */
+async function semantisktFilter(
+	filter: ResolvedSearchFilter,
+	deps: ToolDeps,
+	store: OpenIndex["store"],
+	anmarkningar: string[],
+): Promise<ResolvedSearchFilter> {
+	const f: ResolvedSearchFilter = { ...filter };
+	if (f.kategori?.length && !f.lamningstyp?.length) {
+		try {
+			const typer = await deps.domains.lamningstyperIKategorier(f.kategori);
+			if (typer.length) f.lamningstyp = typer;
+		} catch {
+			// utan översättning: kategorin prövas i D1
+		}
+	}
+	if (f.nara && !f.socken?.length && !f.kommun?.length) {
+		const o = await store.omradenInomRadie(f.nara, 50);
+		if (o.socken.length) f.socken = o.socken;
+		else if (o.kommun.length) f.kommun = o.kommun;
+	}
+	const ej = tillVectorizeFilter(f).ejTillampat.filter((x) => x !== "ord");
+	const namn: Record<string, string> = { nara: "nara (radien)", bbox: "ruta", kategori: "kategori", egenskap: "egenskap", nummer: "nummer", "socken.kommun": "sockens kommun" };
+	const ejText = ej.map((x) => namn[x] ?? x);
+	if (ejText.length)
+		anmarkningar.push(
+			`Den semantiska kanalen kan inte tillämpa ${ejText.join(", ")} före likhetssökningen; de prövas på de ${SEMANTIC_TOP_K} semantiskt närmaste lämningarna${f.socken !== filter.socken || f.kommun !== filter.kommun ? " inom de berörda socknarna/kommunerna" : " i omfånget"}, så få eller inga semantiska träffar kan bli kvar. Ordsök (lage "ord" eller "auto") tillämpar alla filter.`,
+		);
+	return f;
 }
 
 /**
@@ -376,6 +455,7 @@ async function sokReserv(args: SokArgs, r: ResolvedFilter, deps: ToolDeps, orsak
 // ---------------------------------------------------------------- svar
 
 interface Svar {
+	semantisk_tackning?: { inbaddade: number; i_omfang: number; fullstandig: boolean };
 	totalt: number;
 	nabara: number;
 	totalt_ungefar: boolean;
@@ -425,6 +505,7 @@ function respond(args: SokArgs, s: Svar) {
 		sida: args.sida,
 		antal: args.antal,
 		sokkanaler: s.sokkanaler,
+		...(s.semantisk_tackning ? { semantisk_tackning: s.semantisk_tackning } : {}),
 		...(s.sokord?.length ? { sokord: s.sokord } : {}),
 		kalla: s.kalla,
 		hamtad_fran: s.hamtad_fran,
@@ -451,11 +532,13 @@ function respond(args: SokArgs, s: Svar) {
 			const id = [t.lamningsnummer, t.raa_nummer ? `(${t.raa_nummer})` : null].filter(Boolean).join(" ");
 			const plats = list([list(t.kommun), list(t.socken)]);
 			const dist = t.avstand_m !== undefined ? `, ${t.avstand_m} m bort${t.vaderstreck ? ` åt ${t.vaderstreck}` : ""}` : "";
-			const namn = t.namn ? ` "${t.namn}"` : "";
+			const namn = t.namn ? ` ${citat(t.namn)}` : "";
 			const via = t.kanaler && s.sokkanaler.length > 1 ? ` [${t.kanaler.join("+")}]` : "";
 			lines.push(
 				`${sidStart + i}. ${id}${namn} – ${t.lamningstyp ?? "okänd typ"}, ${t.antikvarisk_bedomning ?? "bedömning saknas"}. ${plats}. ${fmtCoord(t.koordinat?.lat, t.koordinat?.lon)}${dist}. ${t.url}${via}`,
 			);
+			// Utdraget är redan rensat (rad i common.ts / chooseUtdrag i store): «» i registertexten
+			// är utbytta mot ‹›, så de enda «» är sökträffarnas markeringar.
 			if (t.utdrag) lines.push(t.utdrag.includes("«") ? `   Källtext (registret; sökträffar inom «»): ${t.utdrag}` : `   Källtext (registret): «${t.utdrag}»`);
 		});
 	}

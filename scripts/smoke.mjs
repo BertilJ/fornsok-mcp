@@ -14,8 +14,9 @@
  *       filter och statistik. Utan --index förväntas reservläge.
  *
  *   node scripts/smoke.mjs --index --semantisk [url]
- *       Dessutom den semantiska kanalen (kräver AI och VECTORIZE, och att
- *       Dalarnas län är inbäddat) – alltså en driftsatt server.
+ *       Kräver dessutom att den semantiska kanalen är ansluten. Utan flaggan
+ *       upptäcks läget ur serverns svar (sokkanaler) och kontrollerna anpassas;
+ *       ett delvis inbäddat omfång ska då synas i svaret (semantisk_tackning).
  *
  *   node scripts/smoke.mjs --utan-inloggning [url]
  *       Kontrollerar att servern avvisar anrop utan Access-JWT med 401
@@ -186,22 +187,34 @@ if (medIndex) {
 const u = await call("uppslag", { lista: "socknar", sok: "Bjursås" });
 check(!u.isError && u.structuredContent?.varden?.[0]?.namn === "Bjursås", "uppslag hittar Bjursås");
 
-// Semantisk sökning: lokalt finns inga AI/VECTORIZE-bindningar, så "betydelse" ger tydligt fel
-// och "auto" är ordsök. Med --semantisk (driftsatt server med bindningarna) prövas kanalen.
-const medSemantik = args.includes("--semantisk");
-const e = await call("sok_lamningar", { fraga: "offerkälla", lage: "betydelse", kommun: ["Falun"] });
+// Semantisk sökning. Läget upptäcks ur serverns svar: "auto" inom omfånget ger
+// sokkanaler ["ord","betydelse"] när kanalen är ansluten, annars ["ord"].
+// --semantisk kräver att kanalen finns (fel om den saknas). Omfånget kan vara
+// delvis inbäddat: då ska svaret säga det (semantisk_tackning och en anmärkning),
+// och "betydelse" får ge få eller inga träffar.
+const kraverSemantik = args.includes("--semantisk");
+const a = await call("sok_lamningar", { fraga: "platser där man offrat", kommun: ["Falun"], antal: 5 });
+const kanaler = JSON.stringify(a.structuredContent?.sokkanaler);
+const medSemantik = kanaler === '["ord","betydelse"]';
+console.log(`\n(semantisk kanal: ${medSemantik ? "ansluten" : "saknas"} enligt sokkanaler ${kanaler})`);
+if (kraverSemantik) check(medSemantik, "--semantisk: servern använder den semantiska kanalen inom omfånget");
 if (medSemantik) {
-	check(!e.isError && JSON.stringify(e.structuredContent?.sokkanaler) === '["betydelse"]', "lage=betydelse inom omfånget ger semantiska träffar");
-	const a = await call("sok_lamningar", { fraga: "platser där man offrat", kommun: ["Falun"], antal: 5 });
-	check(JSON.stringify(a.structuredContent?.sokkanaler) === '["ord","betydelse"]', "auto inom omfånget: ord + betydelse");
+	const tack = a.structuredContent?.semantisk_tackning;
+	check(tack && typeof tack.i_omfang === "number" && typeof tack.inbaddade === "number", `semantisk_tackning anges (${tack ? `${tack.inbaddade} av ${tack.i_omfang}` : "saknas"})`);
+	if (tack && !tack.fullstandig) {
+		check((a.structuredContent?.anmarkningar ?? []).some((x) => /inbäddat till/.test(x)), "delvis inbäddat omfång: svaret säger det");
+	}
+	const e = await call("sok_lamningar", { fraga: "offerkälla", lage: "betydelse", kommun: ["Falun"] });
+	check(!e.isError && JSON.stringify(e.structuredContent?.sokkanaler) === '["betydelse"]', "lage=betydelse inom omfånget svarar med kanalen betydelse");
+	if (tack?.fullstandig) check((e.structuredContent?.traffar ?? []).length > 0, "lage=betydelse ger träffar när omfånget är inbäddat");
 	const ut = await call("sok_lamningar", { fraga: "offerkälla", lage: "betydelse", kommun: ["Uppsala"] });
 	check(ut.isError === true && /gäller bara/.test(ut.content?.[0]?.text ?? ""), "lage=betydelse utanför omfånget ger fel som förklarar var den gäller");
 	const riks = await call("sok_lamningar", { fraga: "offerkälla", antal: 3 });
 	check(JSON.stringify(riks.structuredContent?.sokkanaler) === '["ord"]', "auto utan geografiskt filter: bara ordsök");
 } else {
+	check(kanaler === '["ord"]', "auto utan semantisk kanal: bara ordsök");
+	const e = await call("sok_lamningar", { fraga: "offerkälla", lage: "betydelse", kommun: ["Falun"] });
 	check(e.isError === true, "lage=betydelse ger tydligt fel utan semantisk kanal");
-	const a = await call("sok_lamningar", { fraga: "offerkälla", kommun: ["Falun"], antal: 3 });
-	check(JSON.stringify(a.structuredContent?.sokkanaler) === '["ord"]', "auto utan semantisk kanal: bara ordsök");
 }
 
 // hitta_plats: en socken i indexet. Bara med index, så att röktestet inte anropar Nominatim.

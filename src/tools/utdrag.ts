@@ -1,4 +1,4 @@
-import { BOILERPLATE_RE } from "./common";
+import { BOILERPLATE_RE, rad } from "./common";
 
 /**
  * Ett utdrag på cirka `len` tecken runt första träffen på något av orden,
@@ -6,7 +6,8 @@ import { BOILERPLATE_RE } from "./common";
  */
 export function makeUtdrag(text: string | null | undefined, words: readonly string[] = [], len = 200): string | null {
 	if (!text) return null;
-	const clean = text.replace(BOILERPLATE_RE, "").replace(/\s+/g, " ").trim();
+	// rad(): styrtecken och radbrytningar bort, «» → ‹› (extern text, se common.ts).
+	const clean = rad(text.replace(BOILERPLATE_RE, "")).replace(/\s+/g, " ").trim();
 	if (!clean) return null;
 	if (clean.length <= len) return clean;
 	const lower = clean.toLocaleLowerCase("sv");

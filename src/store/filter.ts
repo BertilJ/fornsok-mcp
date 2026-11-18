@@ -21,7 +21,7 @@ export const MAX_VALUE_LENGTH = 300;
 export const MAX_RADIUS_M = 50_000;
 
 export interface BuiltFilter {
-	conditions: SqlPart[];
+	conditions: FilterPart[];
 	fts: FtsQuery | null;
 	/** Mittpunkt och radie för exakt avståndsfilter. */
 	nara: { p: Planar; radie_m: number } | null;
@@ -42,11 +42,33 @@ function list(name: string, x: unknown): string[] | null {
 
 const json = (v: unknown) => JSON.stringify(v);
 
-function areaCondition(niva: "lan" | "kommun" | "landskap", namn: string[]): SqlPart {
-	return {
-		sql: "l.id IN (SELECT lo.lamning_id FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE o.niva = ? AND o.namn IN (SELECT value FROM json_each(?)))",
-		params: [niva, json(namn)],
-	};
+/**
+ * Ett villkor i två former: `sql` för frågor där lamning är yttre loop, och
+ * `idSub`, en delfråga "(SELECT id …)" med samma parametrar, för frågor där
+ * FTS-tabellen är yttre loop. Där prövas villkoret som `+f.rowid IN idSub`
+ * mot en mängd som byggs en gång, så att lamning inte läses för varje
+ * ordträff (ett vanligt ord har hundratusentals) och FTS5 inte får rowid-
+ * villkoret (då körs MATCH om för varje rad, se ftsFrom i index.ts).
+ */
+export interface FilterPart extends SqlPart {
+	idSub: string;
+}
+
+function idCondition(subquery: string, params: unknown[]): FilterPart {
+	return { sql: `l.id IN ${subquery}`, params, idSub: subquery };
+}
+
+function colCondition(sql: string, where: string, params: unknown[]): FilterPart {
+	return { sql, params, idSub: `(SELECT id FROM lamning WHERE ${where})` };
+}
+
+function areaCondition(niva: "lan" | "kommun" | "landskap", namn: string[]): FilterPart {
+	// CROSS JOIN: namnen driver (omrade via unikt index på niva, namn, sedan
+	// lamning_omrade via primärnyckeln), aldrig hela nivåns lamning_omrade.
+	return idCondition(
+		"(SELECT lo.lamning_id FROM omrade o CROSS JOIN lamning_omrade lo ON lo.omrade_id = o.id WHERE o.niva = ? AND o.namn IN (SELECT value FROM json_each(?)))",
+		[niva, json(namn)],
+	);
 }
 
 /** Normalisera lämningsnummer: "l2001:646" → "L2001:646". */
@@ -61,28 +83,25 @@ export function normRaa(s: string): string {
 }
 
 export function buildFilter(f: IndexSearchFilter): BuiltFilter {
-	const c: SqlPart[] = [];
+	const c: FilterPart[] = [];
 
 	const nummer = list("nummer", f.nummer);
 	if (nummer) {
 		const ln = nummer.map(normLamningsnummer).filter((x): x is string => !!x);
 		const raa = nummer.map(normRaa);
 		const uuids = nummer.map((x) => x.toLowerCase()).filter((x) => /^[0-9a-f-]{36}$/.test(x));
-		c.push({
-			sql: "(l.lamningsnummer IN (SELECT value FROM json_each(?)) OR l.raa_sok IN (SELECT value FROM json_each(?)) OR l.uuid IN (SELECT value FROM json_each(?)))",
-			params: [json(ln), json(raa), json(uuids)],
-		});
+		const w = "(lamningsnummer IN (SELECT value FROM json_each(?)) OR raa_sok IN (SELECT value FROM json_each(?)) OR uuid IN (SELECT value FROM json_each(?)))";
+		c.push(colCondition(w.replace(/\b(lamningsnummer|raa_sok|uuid) IN/g, "l.$1 IN"), w, [json(ln), json(raa), json(uuids)]));
 	}
 	const typ = list("lamningstyp", f.lamningstyp);
-	if (typ) c.push({ sql: "l.lamningstyp IN (SELECT value FROM json_each(?))", params: [json(typ)] });
+	if (typ) c.push(colCondition("l.lamningstyp IN (SELECT value FROM json_each(?))", "lamningstyp IN (SELECT value FROM json_each(?))", [json(typ)]));
 	const kat = list("kategori", f.kategori);
-	if (kat)
-		c.push({
-			sql: "l.lamningstyp IN (SELECT lamningstyp FROM lamningstyp_kategori WHERE kategori IN (SELECT value FROM json_each(?)))",
-			params: [json(kat)],
-		});
+	if (kat) {
+		const k = "lamningstyp IN (SELECT lamningstyp FROM lamningstyp_kategori WHERE kategori IN (SELECT value FROM json_each(?)))";
+		c.push(colCondition(`l.${k}`, k, [json(kat)]));
+	}
 	const bed = list("antikvarisk_bedomning", f.antikvarisk_bedomning as Bedomning[] | undefined);
-	if (bed) c.push({ sql: "l.bedomning IN (SELECT value FROM json_each(?))", params: [json(bed)] });
+	if (bed) c.push(colCondition("l.bedomning IN (SELECT value FROM json_each(?))", "bedomning IN (SELECT value FROM json_each(?))", [json(bed)]));
 	const lan = list("lan", f.lan);
 	if (lan) c.push(areaCondition("lan", lan));
 	const kommun = list("kommun", f.kommun);
@@ -99,13 +118,18 @@ export function buildFilter(f: IndexSearchFilter): BuiltFilter {
 		if (s.length) {
 			// En socken utan län matchar alla socknar med namnet; med län bara socknar i de
 			// länen. Socknar med unikt namn har tomt län i indexet och matchar alltid.
-			c.push({
-				sql: `l.id IN (SELECT lo.lamning_id FROM json_each(?) j
-					JOIN omrade o ON o.niva = 'socken' AND o.namn = json_extract(j.value, '$.namn')
+			// CROSS JOIN håller ordningen namn → omrade → lamning_omrade. Utan den valde
+			// planeraren att läsa alla socknars rader i lamning_omrade (780 000 i hela
+			// landet, 350 ms) och pröva namnet efteråt.
+			c.push(
+				idCondition(
+					`(SELECT lo.lamning_id FROM json_each(?) j
+					CROSS JOIN omrade o ON o.niva = 'socken' AND o.namn = json_extract(j.value, '$.namn')
 						AND (json_array_length(j.value, '$.lan') = 0 OR o.lan = '' OR o.lan IN (SELECT value FROM json_each(j.value, '$.lan')))
-					JOIN lamning_omrade lo ON lo.omrade_id = o.id)`,
-				params: [json(s)],
-			});
+					CROSS JOIN lamning_omrade lo ON lo.omrade_id = o.id)`,
+					[json(s)],
+				),
+			);
 		}
 	}
 
@@ -123,13 +147,15 @@ export function buildFilter(f: IndexSearchFilter): BuiltFilter {
 		// växer inte med antalet typer. En lämning ska ha minst ett av värdena för
 		// varje typ, därför räknas antalet olika typer som träffar.
 		if (byTyp.size)
-			c.push({
-				sql: `l.id IN (SELECT e.lamning_id FROM json_each(?) j
-					JOIN egenskap e ON e.typ = json_extract(j.value, '$.typ')
+			c.push(
+				idCondition(
+					`(SELECT e.lamning_id FROM json_each(?) j
+					CROSS JOIN egenskap e ON e.typ = json_extract(j.value, '$.typ')
 						AND e.varde IN (SELECT value FROM json_each(j.value, '$.varden'))
 					GROUP BY e.lamning_id HAVING count(DISTINCT e.typ) = ?)`,
-				params: [json([...byTyp].map(([typ, varden]) => ({ typ, varden: [...new Set(varden)] }))), byTyp.size],
-			});
+					[json([...byTyp].map(([typ, varden]) => ({ typ, varden: [...new Set(varden)] }))), byTyp.size],
+				),
+			);
 	}
 
 	let box: SwerefBox | null = null;
@@ -143,10 +169,16 @@ export function buildFilter(f: IndexSearchFilter): BuiltFilter {
 		const nb = boxAround(p, r);
 		box = box ? intersect(box, nb) : nb;
 	}
-	if (box) c.push(spatialCondition(box));
+	if (box) c.push(spatialPart(box));
 
 	const fts = buildFtsQuery(f.fraga ?? null, f.ord ?? null);
 	return { conditions: c, fts, nara, box };
+}
+
+/** Det rumsliga villkoret (spatial.ts) som FilterPart. */
+export function spatialPart(box: SwerefBox): FilterPart {
+	const sp = spatialCondition(box);
+	return idCondition(sp.sql.replace(/^l\.id IN /, ""), sp.params);
 }
 
 function intersect(a: SwerefBox, b: SwerefBox): SwerefBox {

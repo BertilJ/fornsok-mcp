@@ -1,11 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { strikt } from "./schema";
 import { SOURCE_NAMES, ToolInputError, UpstreamError } from "../errors";
 import { type Geometry, simplifyToLimit, swerefToWgs, wgsToSweref, countPositions } from "../geo/geometry";
 import { type ParsedId, parseId } from "../ids";
 import type { LamningPost, RecordFetchResult, Referenser, Version } from "../sources/types";
 import { IndexInputError } from "../store/d1";
-import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, fmtCoord, list, ok, runTool } from "./common";
+import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, citat, fmtCoord, list, ok, rad, runTool, EXTERN_TEXT } from "./common";
 import { type DokumentPost, dokumentPost, formatDokumentRad, toDokumentPost } from "./dokument";
 import type { OpenIndex } from "./via_index";
 
@@ -18,7 +19,7 @@ const SENARE: Record<string, string> = {
 	relaterat: "Relaterat material (foton, arkivhandlingar, föremål) finns inte än – kommer senare.",
 };
 
-export const lamningInput = z.object({
+export const lamningInput = strikt("lamning", {
 	id: z
 		.array(z.string().min(1).max(200))
 		.min(1)
@@ -121,7 +122,7 @@ export function registerLamning(server: McpServer, deps: ToolDeps): void {
 				"Hela posten för 1–10 lämningar ur Kulturmiljöregistret: identiteter, typ, antikvarisk bedömning med motivering, beskrivning, " +
 				"tradition, terräng, orientering, egenskaper, ingående lämningar, statusar, indelning, mittpunkt och lägesosäkerhet. " +
 				"Tar lämningsnummer, RAÄ-nummer (äldre litteratur; ett nummer som delas av flera lämningar ger alla), UUID eller K-samsök-URI. Grundposten kommer ur serverns eget index; saknas den där, eller är indexet otillgängligt, hämtas den från Fornsök-appen med K-samsök som reserv. " +
-				"`inkludera` lägger till geometri, referenser, dokument (med dokument_ref till hamta_dokument) och versionshistorik.",
+				"`inkludera` lägger till geometri, referenser, dokument (med dokument_ref till hamta_dokument) och versionshistorik." + EXTERN_TEXT,
 			inputSchema: lamningInput,
 			outputSchema: lamningOutput,
 			annotations: { ...READ_ONLY, title: "Hämta lämning" },
@@ -379,37 +380,37 @@ export function formatPost(l: LamningPost): string {
 	lines.push(`${id} – ${l.lamningstyp ?? "okänd typ"}${l.kategori?.length ? ` [${l.kategori.join(", ")}]` : ""}`);
 	lines.push(`Länk: ${l.url}`);
 	lines.push(
-		`Antikvarisk bedömning (registrets): ${l.antikvarisk_bedomning.varde ?? "saknas"}${l.antikvarisk_bedomning.motivering ? ` – ${l.antikvarisk_bedomning.motivering}` : ""}`,
+		`Antikvarisk bedömning (registrets): ${rad(l.antikvarisk_bedomning.varde) || "saknas"}${l.antikvarisk_bedomning.motivering ? ` – motivering (källtext): ${citat(l.antikvarisk_bedomning.motivering)}` : ""}`,
 	);
 	lines.push(`Indelning: ${list([list(l.indelning.lan), list(l.indelning.kommun), list(l.indelning.socken)])}${l.indelning.landskap.length ? `; landskap ${list(l.indelning.landskap)}` : ""}`);
 	const osak = l.lage.osakerhet_m !== null ? `, lägesosäkerhet ${l.lage.osakerhet_m} m` : "";
 	const sw = l.lage.sweref99tm ? ` (SWEREF 99 TM N ${l.lage.sweref99tm.n}, E ${l.lage.sweref99tm.e})` : "";
 	lines.push(`Läge: ${fmtCoord(l.lage.lat, l.lage.lon)}${sw}${osak}${l.lage.geometrityp ? `, geometri ${l.lage.geometrityp}` : ""}`);
-	if (l.namn?.length) lines.push(`Namn: ${l.namn.join(", ")}`);
+	if (l.namn?.length) lines.push(`Namn (källtext): ${l.namn.map(citat).join(", ")}`);
 	const statusar = list([l.statusar.aktualitet, l.statusar.placering, l.statusar.skada ? `skada: ${l.statusar.skada}` : null, l.statusar.undersokning ? `undersökning: ${l.statusar.undersokning}` : null]);
 	if (statusar) lines.push(`Status: ${statusar}`);
 	const kt = (label: string, v: string | null | undefined) => {
 		const t = stripBoilerplate(v ?? null);
-		if (t) lines.push(`${label} (källtext): «${t}»`);
+		if (t) lines.push(`${label} (källtext): ${citat(t)}`);
 	};
 	kt("Beskrivning", l.beskrivning);
 	kt("Tradition", l.tradition);
 	kt("Terräng", l.terrang);
 	kt("Orientering", l.orientering);
 	kt("Antikvarisk kommentar", l.antikvarisk_kommentar);
-	if (l.egenskaper.length) lines.push(`Egenskaper: ${l.egenskaper.map((e) => `${e.typ}: ${e.varde}`).join("; ")}`);
+	if (l.egenskaper.length) lines.push(`Egenskaper (källtext): ${l.egenskaper.map((e) => `${rad(e.typ)}: ${citat(e.varde)}`).join("; ")}`);
 	if (l.ingaende_lamningar.length) {
 		lines.push(
-			`Ingående lämningar: ${l.ingaende_lamningar
-				.map((i) => `${i.lamningstyp}${i.antal !== null ? ` ×${i.antal}` : ""}${i.egenskaper.length ? ` (${i.egenskaper.map((e) => `${e.typ}: ${e.varde}`).join(", ")})` : ""}`)
+			`Ingående lämningar (källtext): ${l.ingaende_lamningar
+				.map((i) => `${rad(i.lamningstyp)}${i.antal !== null ? ` ×${i.antal}` : ""}${i.egenskaper.length ? ` (${i.egenskaper.map((e) => `${rad(e.typ)}: ${citat(e.varde)}`).join(", ")})` : ""}`)
 				.join("; ")}`,
 		);
 	}
 	if (l.referenser) {
 		const r = l.referenser;
-		if (r.skriftliga_kallor.length) lines.push(`Skriftliga källor: ${r.skriftliga_kallor.join(" | ")}`);
-		if (r.kartmaterial.length) lines.push(`Kartmaterial: ${r.kartmaterial.join(" | ")}`);
-		if (r.uppgiftslamnare.length) lines.push(`Uppgiftslämnare: ${r.uppgiftslamnare.join(" | ")}`);
+		if (r.skriftliga_kallor.length) lines.push(`Skriftliga källor (källtext): ${r.skriftliga_kallor.map(citat).join(" | ")}`);
+		if (r.kartmaterial.length) lines.push(`Kartmaterial (källtext): ${r.kartmaterial.map(citat).join(" | ")}`);
+		if (r.uppgiftslamnare.length) lines.push(`Uppgiftslämnare (källtext): ${r.uppgiftslamnare.map(citat).join(" | ")}`);
 		if (!r.skriftliga_kallor.length && !r.kartmaterial.length && !r.uppgiftslamnare.length) lines.push("Referenser: inga i registret.");
 	}
 	if (l.geometri !== undefined) {
@@ -437,9 +438,9 @@ export function formatPost(l: LamningPost): string {
 function formatVersion(v: Version): string {
 	const a = v.aktivitet;
 	const akt = a
-		? [a.typ, a.nummer, a.atgardstyp ? `(${a.atgardstyp})` : null, a.beskrivning && a.beskrivning !== a.atgardstyp ? `– ${a.beskrivning}` : null]
+		? [rad(a.typ), rad(a.nummer), a.atgardstyp ? `(${rad(a.atgardstyp)})` : null, a.beskrivning && a.beskrivning !== a.atgardstyp ? `– ${citat(a.beskrivning)}` : null]
 				.filter(Boolean)
 				.join(" ")
 		: "aktivitet okänd";
-	return `- ${v.publicerad ? v.publicerad.slice(0, 10) : "okänt datum"}: ${v.registrerare ?? "okänd registrerare"}; ${akt}${a?.registrerad ? `, registrerad ${a.registrerad.slice(0, 10)}` : ""}`;
+	return `- ${v.publicerad ? rad(v.publicerad.slice(0, 10)) : "okänt datum"}: ${rad(v.registrerare) || "okänd registrerare"}; ${akt}${a?.registrerad ? `, registrerad ${a.registrerad.slice(0, 10)}` : ""}`;
 }

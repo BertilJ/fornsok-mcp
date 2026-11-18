@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { strikt } from "./schema";
 import type { ResolvedSearchFilter } from "../sources/types";
 import { MAX_STATISTIK_RADER, STATISTIK_DIMENSIONER } from "../store/index";
 import { READ_ONLY, type ToolDeps, ok, runTool } from "./common";
@@ -16,7 +17,7 @@ const NIVA_NAMN: Record<(typeof STATISTIK_DIMENSIONER)[number], string> = {
 	landskap: "landskap",
 };
 
-export const statistikInput = z.object({
+export const statistikInput = strikt("statistik", {
 	gruppera_pa: z
 		.array(z.enum(STATISTIK_DIMENSIONER))
 		.min(1)

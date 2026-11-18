@@ -23,7 +23,7 @@ import {
 	vektorerUrSvar,
 } from "./bindings";
 import { type LamningsMeta, varianter, vektorId } from "./filter";
-import { parseScope, type Scope } from "./scope";
+import { checkedScope, parseScope, type Scope } from "./scope";
 import { inbaddningstext } from "./text";
 
 /** Texter per anrop till Workers AI. 50 × högst 512 token ryms med god marginal i modellens 60 000. */
@@ -31,6 +31,10 @@ export const AI_BATCH = 50;
 /** Vektorer per upsert (Workers-gränsen är 1 000). */
 export const UPSERT_BATCH = 500;
 export const STANDARD_MAX = 1000;
+/** Så många försök med samma radhash innan en lämning hoppas över. */
+export const MAX_FEL_PER_POST = 3;
+/** Så många misslyckade anrop till Workers AI per körning innan körningen ger upp (tjänsten är nere). */
+export const MAX_AI_FEL_PER_KORNING = 12;
 
 export interface EmbedResult {
 	/** Lämningar som bäddades in (nya eller ändrade). */
@@ -45,6 +49,8 @@ export interface EmbedResult {
 	borttagna: number;
 	/** true när inget återstod efter körningen (inom `max`). */
 	klar: boolean;
+	/** Lämningar vars inbäddning fallerade i körningen (bokförda i inbaddning_fel). */
+	fel?: number;
 	omfang: string[];
 }
 
@@ -129,7 +135,14 @@ export async function runEmbedBatch(
 	const vec = env.VECTORIZE;
 	if (!db || !ai || !vec)
 		throw new Error("runEmbedBatch: bindningarna DB, AI och VECTORIZE behövs");
-	const scope: Scope = parseScope(env.SEMANTIC_LAN);
+	let scope: Scope;
+	try {
+		scope = checkedScope(env.SEMANTIC_LAN);
+	} catch (e) {
+		// Tomt eller felstavat omfång: rör ingenting (annars räknas allt som utanför och tas bort).
+		console.error(`inbäddning: ${e instanceof Error ? e.message : String(e)}`);
+		throw e;
+	}
 	const max = Math.max(1, Math.min(10_000, opts.max ?? STANDARD_MAX));
 	const tid = (opts.now ?? new Date()).toISOString();
 	const scopeJson = JSON.stringify(scope.lan);
@@ -142,6 +155,22 @@ export async function runEmbedBatch(
 		klar: false,
 		omfang: scope.lan,
 	};
+
+	// ------------------------------------------------ klart sedan sist?
+	// När omfånget är färdiginbäddat och inget har ändrats (ingen ny grundladdning
+	// eller avstämning, samma omfång och modell, tom kö) behövs inga genomsökningar
+	// av hela omfånget; nattsynkens ändringar kommer via inbaddning_ko.
+	const st = await rows<{ nyckel: string; varde: string | null }>(
+		db,
+		"SELECT nyckel, varde FROM synk_status WHERE nyckel IN ('senaste_grundladdning', 'senaste_avstamning', 'inbaddning_klar')",
+	);
+	const stv = new Map(st.map((r) => [r.nyckel, r.varde]));
+	const signatur = JSON.stringify({ g: stv.get("senaste_grundladdning") ?? null, a: stv.get("senaste_avstamning") ?? null, omfang: scope.lan, modell: MODELL });
+	const [ko0] = await rows<{ n: number }>(db, "SELECT count(*) AS n FROM inbaddning_ko");
+	if (Number(ko0?.n ?? 0) === 0 && stv.get("inbaddning_klar") === signatur) {
+		res.klar = true;
+		return res;
+	}
 
 	// ------------------------------------------------ arbetslista
 	const arbete = new Set<string>();
@@ -159,9 +188,11 @@ export async function runEmbedBatch(
 			`SELECT l.uuid FROM lamning l
 			  WHERE l.id IN (${SCOPE_IDS})
 			    AND NOT EXISTS (SELECT 1 FROM inbaddning i WHERE i.uuid = l.uuid AND i.rad_hash = l.hash AND i.modell = ?)
+			    AND NOT EXISTS (SELECT 1 FROM inbaddning_fel f WHERE f.uuid = l.uuid AND f.rad_hash = l.hash AND f.forsok >= ?)
 			  ORDER BY l.id LIMIT ?`,
 			scopeJson,
 			MODELL,
+			MAX_FEL_PER_POST,
 			limit + 1,
 		);
 		nyaKvar = nya.length > limit;
@@ -183,6 +214,7 @@ export async function runEmbedBatch(
 	}
 	if (arbete.size === 0) {
 		res.klar = true;
+		await markeraKlar(db, signatur, tid);
 		return res;
 	}
 
@@ -199,6 +231,13 @@ export async function runEmbedBatch(
 		lista,
 	))
 		data.set(r.uuid, r);
+	const felade = new Map<string, { rad_hash: string; forsok: number; senaste_fel: string | null }>();
+	for (const r of await rows<{ uuid: string; rad_hash: string; forsok: number; senaste_fel: string | null }>(
+		db,
+		"SELECT uuid, rad_hash, forsok, senaste_fel FROM inbaddning_fel WHERE uuid IN (SELECT value FROM json_each(?))",
+		lista,
+	))
+		felade.set(r.uuid, r);
 	const bokford = new Map<string, Bokford>();
 	for (const r of await rows<Bokford>(
 		db,
@@ -274,6 +313,13 @@ export async function runEmbedBatch(
 			res.oforandrade++;
 			continue;
 		}
+		const f = felade.get(uuid);
+		if (f && f.rad_hash === d.hash && f.forsok >= MAX_FEL_PER_POST) {
+			// Har fallerat för många gånger med samma text: hoppa över (och ta ur kön) tills raden ändras.
+			console.warn(`inbäddning: ${uuid} hoppas över efter ${f.forsok} misslyckade försök (${f.senaste_fel ?? "okänt fel"})`);
+			bokforing.push(ur(uuid));
+			continue;
+		}
 		jobb.push({ uuid, text, meta, radHash: d.hash, innehall, tidigare: b?.vektorer ?? 0 });
 	}
 
@@ -283,10 +329,46 @@ export async function runEmbedBatch(
 	for (let i = 0; i < bokforing.length; i += 50) await db.batch(bokforing.slice(i, i + 50));
 
 	// ------------------------------------------------ inbäddning
+	// En del som fallerar halveras ned till enskilda lämningar, så att en text som
+	// modellen avvisar inte blockerar resten. Enskilda fel bokförs i inbaddning_fel;
+	// efter MAX_FEL_PER_POST försök hoppas lämningen över tills raden ändras.
+	let aiFel = 0;
+	const felSatser: D1LikeStatement[] = [];
+	const baddaIn = async (del: Jobb[]): Promise<Array<{ j: Jobb; v: number[] }>> => {
+		try {
+			const svar = await ai.run(MODELL, { text: del.map((j) => j.text), truncate_inputs: true });
+			const v = vektorerUrSvar(svar, del.length);
+			return del.map((j, k) => ({ j, v: v[k] }));
+		} catch (e) {
+			aiFel++;
+			const msg = e instanceof Error ? e.message : String(e);
+			console.error(`inbäddning: Workers AI fallerade för ${del.length} texter (${del[0].uuid} …): ${msg.slice(0, 500)}`);
+			if (aiFel >= MAX_AI_FEL_PER_KORNING) {
+				const fel = new Error(`Workers AI fallerade ${aiFel} gånger i körningen; avbryter (senaste: ${msg.slice(0, 300)})`);
+				(fel as { cause?: unknown }).cause = e;
+				throw fel;
+			}
+			if (del.length === 1) {
+				felSatser.push(
+					db
+						.prepare(
+							"INSERT INTO inbaddning_fel (uuid, rad_hash, forsok, senaste_fel, andrad) VALUES (?, ?, 1, ?, ?) ON CONFLICT(uuid) DO UPDATE SET forsok = CASE WHEN inbaddning_fel.rad_hash = excluded.rad_hash THEN inbaddning_fel.forsok + 1 ELSE 1 END, rad_hash = excluded.rad_hash, senaste_fel = excluded.senaste_fel, andrad = excluded.andrad",
+						)
+						.bind(del[0].uuid, del[0].radHash, msg.slice(0, 500), tid),
+				);
+				res.fel = (res.fel ?? 0) + 1;
+				return [];
+			}
+			const mitt = Math.ceil(del.length / 2);
+			return [...(await baddaIn(del.slice(0, mitt))), ...(await baddaIn(del.slice(mitt)))];
+		}
+	};
 	for (let i = 0; i < jobb.length; i += AI_BATCH) {
-		const del = jobb.slice(i, i + AI_BATCH);
-		const svar = await ai.run(MODELL, { text: del.map((j) => j.text), truncate_inputs: true });
-		const vektorer = vektorerUrSvar(svar, del.length);
+		const ok = await baddaIn(jobb.slice(i, i + AI_BATCH));
+		if (felSatser.length) await db.batch(felSatser.splice(0));
+		const del = ok.map((x) => x.j);
+		const vektorer = ok.map((x) => x.v);
+		if (!del.length) continue;
 		const upserts: VectorizeVector[] = [];
 		const overskott: string[] = [];
 		del.forEach((j, k) => {
@@ -309,8 +391,17 @@ export async function runEmbedBatch(
 	}
 
 	const koKvar = await rows<{ n: number }>(db, "SELECT count(*) AS n FROM inbaddning_ko");
-	res.klar = !nyaKvar && !gamlaKvar && Number(koKvar[0]?.n ?? 0) === 0;
+	res.klar = !nyaKvar && !gamlaKvar && Number(koKvar[0]?.n ?? 0) === 0 && !res.fel;
+	if (res.klar) await markeraKlar(db, signatur, tid);
 	return res;
+}
+
+async function markeraKlar(db: D1Like, signatur: string, tid: string): Promise<void> {
+	await db.batch([
+		db
+			.prepare("INSERT INTO synk_status (nyckel, varde, andrad) VALUES ('inbaddning_klar', ?, ?) ON CONFLICT(nyckel) DO UPDATE SET varde = excluded.varde, andrad = excluded.andrad")
+			.bind(signatur, tid),
+	]);
 }
 
 /** Hur mycket som återstår inom omfånget (för loggning och uppföljning). */

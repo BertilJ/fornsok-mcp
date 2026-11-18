@@ -132,6 +132,13 @@ export async function hamtaFlode(
 		totalPages = s.totalPages;
 		sida++;
 		if (s.last || s.poster.length === 0) break;
+		if (sida >= FLODE_MAX_SIDOR && sida < totalPages) {
+			// Trunkera aldrig tyst: då skulle markören flyttas förbi ändringar som inte lästs.
+			throw new UpstreamError(
+				"raa_datauttag",
+				`Ändringsflödet för ${fran}–${till} har ${totalPages} sidor, fler än ${FLODE_MAX_SIDOR} som läses per intervall; kortare intervall behövs`,
+			);
+		}
 	}
 	return { poster: [...byUuid.values()], sidor: sida };
 }

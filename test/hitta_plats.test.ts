@@ -12,6 +12,7 @@ import type { KvLike } from "../src/cache/kv";
 import { runSync } from "../src/sync/run";
 import {
 	aterstallNominatimKo,
+	sattNominatimKo,
 	createHittaPlatsDeps,
 	HITTA_PLATS_BESKRIVNING,
 	type HittaPlatsDeps,
@@ -257,6 +258,22 @@ describe("hitta_plats", () => {
 		await hittaPlats({ namn: "Stora Stöten" }, deps);
 		expect(nom.calls).toHaveLength(3);
 		expect(sleeps).toEqual([1100, 1100]);
+	});
+
+	it("ett anrop som aldrig blir klart (avbruten förfrågan) blockerar inte senare anrop för alltid", async () => {
+		sattNominatimKo({ maxHoldMs: 100, maxWaitMs: 2000, pollMs: 5 });
+		const hang = { ...deps, client: { get: () => new Promise<never>(() => {}) } as unknown as HittaPlatsDeps["client"] };
+		void hittaPlats({ namn: "Hänger" }, hang);
+		await new Promise((r) => setTimeout(r, 20));
+		const r = await hittaPlats({ namn: "Falu gruva" }, deps);
+		expect(structured(r).kalla).toBe("nominatim");
+		// Väntan har en gräns: upptaget ger ett svar med anmärkning, inte en hängning.
+		sattNominatimKo({ maxHoldMs: 60_000, maxWaitMs: 30, pollMs: 5 });
+		void hittaPlats({ namn: "Hänger igen" }, hang);
+		await new Promise((r) => setTimeout(r, 10));
+		const r2 = await hittaPlats({ namn: "Kopparvågen" }, deps);
+		expect(structured(r2).anmarkningar.join(" ")).toMatch(/Nominatim gick inte att nå \(OpenStreetMap Nominatim är upptaget/);
+		aterstallNominatimKo();
 	});
 
 	it("tomma svar sparas också; utan träff tips om TORA", async () => {

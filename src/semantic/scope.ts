@@ -44,3 +44,27 @@ export function scopeText(scope: Scope): string {
 export function inScope(scope: Scope, lan: readonly string[]): boolean {
 	return lan.some((l) => scope.lan.includes(l));
 }
+
+/** Omfånget går inte att använda (tomt eller med län som inte gick att tolka). */
+export class OmfangError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "OmfangError";
+	}
+}
+
+/**
+ * Som parseScope, men kastar OmfangError om omfånget är tomt eller innehåller
+ * okända län. Används av allt som skriver eller tar bort vektorer: ett
+ * felstavat `SEMANTIC_LAN` ("Dalarn") gav annars ett tomt omfång, och
+ * inbäddningen tog då bort alla vektorer som "utanför omfånget".
+ */
+export function checkedScope(value?: string | null): Scope {
+	const s = parseScope(value);
+	if (s.okanda.length)
+		throw new OmfangError(
+			`SEMANTIC_LAN innehåller län som inte gick att tolka: ${s.okanda.map((x) => `"${x}"`).join(", ")} (värde ${JSON.stringify(value ?? "")}). Inget görs förrän inställningen är rättad.`,
+		);
+	if (!s.lan.length) throw new OmfangError(`SEMANTIC_LAN ger ett tomt omfång (värde ${JSON.stringify(value ?? "")}). Inget görs förrän inställningen är rättad.`);
+	return s;
+}

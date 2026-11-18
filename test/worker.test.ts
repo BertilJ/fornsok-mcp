@@ -97,6 +97,47 @@ describe("Access före all routing", () => {
 	});
 });
 
+describe("hela vägen: POST /mcp med giltig JWT genom createMcpHandler (granskningen, punkt 8b)", () => {
+	async function rpc(env: WorkerEnv, tok: string | null, body: unknown) {
+		const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" };
+		if (tok) headers[ACCESS_HEADER] = tok;
+		const r = await worker.fetch(new Request("https://fornsok.example.se/mcp", { method: "POST", headers, body: JSON.stringify(body) }), env, ctx);
+		const text = await r.text();
+		const data = r.headers.get("content-type")?.includes("text/event-stream")
+			? text
+					.split("\n")
+					.filter((l) => l.startsWith("data:"))
+					.map((l) => JSON.parse(l.slice(5)))
+			: text
+				? [JSON.parse(text)]
+				: [];
+		return { status: r.status, data };
+	}
+
+	it("initialize och tools/list ger svar; samma anrop utan JWT ger 401", async () => {
+		const t = team();
+		const env: WorkerEnv = { ACCESS_TEAM_DOMAIN: t, ACCESS_AUD: AUD };
+		const tok = await token(t, { email: "a@example.com", sub: "1" });
+		const init = await rpc(env, tok, {
+			jsonrpc: "2.0",
+			id: 1,
+			method: "initialize",
+			params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } },
+		});
+		expect(init.status).toBe(200);
+		expect(init.data[0]?.result?.serverInfo?.name).toBeTruthy();
+		const list = await rpc(env, tok, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+		expect(list.status).toBe(200);
+		expect(list.data[0]?.result?.tools?.map((x: { name: string }) => x.name)).toContain("sok_lamningar");
+		// Okänd parameter ger verktygsfel hela vägen genom handlern (strikta scheman).
+		const fel = await rpc(env, tok, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "uppslag", arguments: { lista: "lan", soek: "x" } } });
+		expect(fel.data[0]?.result?.isError).toBe(true);
+		expect(JSON.stringify(fel.data[0]?.result?.content)).toMatch(/Okänd parameter \\"soek\\"/);
+		const utan = await rpc(env, null, { jsonrpc: "2.0", id: 4, method: "tools/list", params: {} });
+		expect(utan.status).toBe(401);
+	});
+});
+
 describe("utvecklingsläge (ACCESS_DEV_BYPASS)", () => {
 	it('bara exakt "true" slår på det', () => {
 		expect(accessConfig({ ACCESS_DEV_BYPASS: "true" }).devBypass).toBe(true);

@@ -4,8 +4,8 @@
  * node:sqlite och migreringarna 0001 + 0002.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { hamtaFlode, parseFlodeSida } from "../../src/sync/flode";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FLODE_MAX_SIDOR, hamtaFlode, parseFlodeSida } from "../../src/sync/flode";
 import { runSync, STATUS_SENAST } from "../../src/sync/run";
 import { senasteKlaraDag } from "../../src/sync/datum";
 import { UpstreamClient } from "../../src/upstream/client";
@@ -96,6 +96,13 @@ describe("ändringsflödet (inspelat 2026-11-10)", () => {
 			"8",
 		]);
 		expect(seen.every((ua) => ua.startsWith("fornsok-mcp/0.1 (+"))).toBe(true);
+	});
+
+	it("fler sidor än FLODE_MAX_SIDOR ger fel i stället för tyst trunkering", async () => {
+		const raa = fakeRaa();
+		raa.flode.set("2026-11-10", Array.from({ length: FLODE_MAX_SIDOR + 5 }, (_, i) => flodePost(`00000000-0000-4000-8000-${String(i).padStart(12, "0")}`, `L2099:${i}`, ["NY"])));
+		const client = new UpstreamClient({ userAgent: "fornsok-mcp/0.1 (+https://example.org/kontakt)", fetch: raa.fetch });
+		await expect(hamtaFlode(client, "2026-11-10", "2026-11-10", { storlek: 1 })).rejects.toThrow(/fler än 200 som läses per intervall/);
 	});
 });
 
@@ -450,6 +457,68 @@ describe("runSync", () => {
 		expect(r.status).toBe("fel");
 		expect(status(db, STATUS_SENAST)).toBeNull();
 		expect((db.prepare("SELECT fel FROM synk").get() as { fel: string }).fel).toMatch(/503/);
+	});
+
+	// ------------------------------------------------ granskningen av synken, punkt 2 och 3
+
+	it("infrastrukturfel (5xx, båda källorna) förbrukar inga försök; strömbrytaren avbryter efter de första", async () => {
+		const extra = Array.from({ length: 8 }, (_, i) => `00000000-0000-4000-8000-0000000000${String(i + 10)}`);
+		raa.flode.set("2026-11-11", extra.map((u, i) => flodePost(u, `L2099:${i}`, ["NY"])));
+		for (const u of extra) raa.app.set(u, 503);
+		raa.ksamsokStatus = 503;
+		const r = await runSync(env(), opts());
+		expect(r.fel.join(" ")).toMatch(/strömbrytare: de 5 första posterna/);
+		const ko = db.prepare("SELECT forsok FROM synk_ko").all() as Array<{ forsok: number }>;
+		expect(ko).toHaveLength(8);
+		expect(ko.every((k) => k.forsok === 0)).toBe(true);
+		// Bara fem poster prövades mot appen (varje med ett omförsök i klienten).
+		expect(new Set(raa.calls.filter((u) => u.hostname === "app.raa.se" && /\/lamning\/lamning\//.test(u.pathname)).map((u) => u.pathname)).size).toBe(5);
+	});
+
+	it("fel på posten räknas en gång per kalenderdag, inte per körning", async () => {
+		raa.app.set(UUID.L1946_7415, 400);
+		raa.ksamsokStatus = 400;
+		const forsok = () => (db.prepare("SELECT forsok FROM synk_ko WHERE uuid = ?").get(UUID.L1946_7415) as { forsok: number }).forsok;
+		await runSync(env(), opts());
+		expect(forsok()).toBe(1);
+		await runSync(env(), opts({ now: new Date(NU.getTime() + 60 * 60 * 1000) }));
+		await runSync(env(), opts({ now: new Date(NU.getTime() + 2 * 60 * 60 * 1000) }));
+		expect(forsok()).toBe(1);
+		await runSync(env(), opts({ now: dagEfter(NU, 1) }));
+		expect(forsok()).toBe(2);
+	});
+
+	it("404 i appen utan UTGAR: efter maxForsok dagar tas posten bort om K-samsök inte heller har den", async () => {
+		await runSync(env(), opts());
+		expect(count(db, "SELECT count(*) AS n FROM lamning WHERE uuid = ?", UUID.L1946_7415)).toBe(1);
+		raa.flode.set("2026-11-12", [flodePost(UUID.L1946_7415, "L1946:7415", ["OVRIG_UPPDATERING"])]);
+		raa.app.set(UUID.L1946_7415, 404);
+		raa.ksamsokStatus = 404;
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const r = await runSync(env(), opts({ now: dagEfter(NU, 1), maxForsok: 1 }));
+			expect(r.fel.join(" ")).toMatch(/finns varken i Fornsök-appen \(404\) eller K-samsök/);
+			expect(r.borttagna).toBe(1);
+			expect(warn).toHaveBeenCalled();
+		} finally {
+			warn.mockRestore();
+		}
+		expect(count(db, "SELECT count(*) AS n FROM lamning WHERE uuid = ?", UUID.L1946_7415)).toBe(0);
+		expect(count(db, "SELECT count(*) AS n FROM synk_ko")).toBe(0);
+	});
+
+	it("404 i appen men posten finns i K-samsök: lämnas i indexet åt avstämningen, med logg", async () => {
+		await runSync(env(), opts());
+		raa.flode.set("2026-11-12", [flodePost(UUID.L1946_7415, "L1946:7415", ["OVRIG_UPPDATERING"])]);
+		raa.app.set(UUID.L1946_7415, 404);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const r = await runSync(env(), opts({ now: dagEfter(NU, 1), maxForsok: 1 }));
+			expect(r.fel.join(" ")).toMatch(/finns i K-samsök; lämnas åt avstämningen/);
+		} finally {
+			warn.mockRestore();
+		}
+		expect(count(db, "SELECT count(*) AS n FROM lamning WHERE uuid = ?", UUID.L1946_7415)).toBe(1);
 	});
 });
 

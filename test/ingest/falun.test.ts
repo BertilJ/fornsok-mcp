@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AvstamningError, diff, hashesFromSqlite, hashesFromWranglerJson, hashQueries, load } from "../../ingest/load.ts";
-import { DbSink, FileSink, MIGRATION } from "../../ingest/sink.ts";
+import { applyMigrations, DbSink, FileSink } from "../../ingest/sink.ts";
 import { MAX_STATEMENT_BYTES, type SqlSink } from "../../ingest/sql.ts";
 import { FALUN_GPKG, HAS_FALUN, type LoadedFalun, loadFalun, SKIP_MESSAGE } from "../store/falun-fixture";
 
@@ -146,7 +146,7 @@ describe.skipIf(!HAS_FALUN)(`Falu kommun ${HAS_FALUN ? "" : `(${SKIP_MESSAGE})`}
 	it("SQL-filerna ger samma databas som den direkta laddningen, även när de körs två gånger", () => {
 		const fromFiles = new DatabaseSync(":memory:");
 		fromFiles.exec("PRAGMA foreign_keys = ON");
-		fromFiles.exec(readFileSync(MIGRATION, "utf8"));
+		applyMigrations(fromFiles);
 		for (const name of files) fromFiles.exec(readFileSync(join(sqlDir, name), "utf8"));
 		const once = tableCounts(fromFiles);
 		for (const name of files) fromFiles.exec(readFileSync(join(sqlDir, name), "utf8"));
@@ -170,7 +170,7 @@ describe.skipIf(!HAS_FALUN)(`Falu kommun ${HAS_FALUN ? "" : `(${SKIP_MESSAGE})`}
 		// Ändra en hash, ta bort en rad, lägg till en okänd lämning.
 		const work = new DatabaseSync(":memory:");
 		work.exec("PRAGMA foreign_keys = ON");
-		work.exec(readFileSync(MIGRATION, "utf8"));
+		applyMigrations(work);
 		for (const name of files) work.exec(readFileSync(join(sqlDir, name), "utf8"));
 		work.exec("UPDATE lamning SET hash = 'x', beskrivning = 'fel' WHERE lamningsnummer = 'L2001:646'");
 		work.exec("DELETE FROM lamning WHERE lamningsnummer = 'L2000:8802'");

@@ -122,6 +122,15 @@ export class Semaphore {
 
 const MAX_REDIRECTS = 2;
 
+/**
+ * Största svarskropp som läses (utom bildfiler, som har egen gräns). Källornas
+ * svar är långt mindre: värdelistorna 0,3 MB, en flödessida cirka 1 MB, en
+ * OGC-sida med geometrier några MB. Med fyra samtidiga anrop per källa och
+ * JSON-tolkning (som ungefär fördubblar) håller 8 MB minnet långt under
+ * Workers gräns på 128 MB; 20 MB kunde närma sig den.
+ */
+export const MAX_BODY_BYTES = 8 * 1024 * 1024;
+
 export class UpstreamClient {
 	private readonly fetchImpl: FetchLike;
 	private readonly timeoutMs: number;
@@ -135,7 +144,7 @@ export class UpstreamClient {
 		this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
 		this.timeoutMs = options.timeoutMs ?? UPSTREAM_TIMEOUT_MS;
 		this.retryDelayMs = options.retryDelayMs ?? 300;
-		this.maxBodyBytes = options.maxBodyBytes ?? 20 * 1024 * 1024;
+		this.maxBodyBytes = options.maxBodyBytes ?? MAX_BODY_BYTES;
 		this.maxConcurrent = options.maxConcurrent ?? MAX_CONCURRENT_PER_SOURCE;
 		this.userAgent = options.userAgent ?? USER_AGENT;
 	}

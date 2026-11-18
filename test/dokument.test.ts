@@ -157,12 +157,27 @@ describe("verktygen via MCP", () => {
 	});
 
 	it("lamning_dokument: lämning utan dokument (appen svarar 404) är ett vanligt svar", async () => {
-		const c = await connectMcp();
+		const c = await connectMcp([
+			{ match: (u) => u.pathname === "/open/fornsok/api/lamning/dokument" && u.searchParams.get("lamning_id") === U7415, respond: () => new Response("{}", { status: 404 }) },
+			...standardRoutes(),
+		]);
 		client = c.client;
-		const r = await c.client.callTool({ name: "lamning_dokument", arguments: { id: "00000000-0000-4000-8000-000000000000" } });
+		const r = await c.client.callTool({ name: "lamning_dokument", arguments: { id: U7415 } });
 		expect(r.isError).toBeFalsy();
 		expect((r.structuredContent as Structured).totalt).toBe(0);
 		expect((r.content as Content)[0].text).toMatch(/Inga dokument/);
+	});
+
+	it("lamning_dokument: ett UUID som inte finns ger 'hittades inte', inte 'inga dokument'", async () => {
+		const Z = "00000000-0000-4000-8000-000000000000";
+		const c = await connectMcp([
+			{ match: (u) => u.pathname.endsWith(`/lamning/lamning/${Z}`) || u.pathname === `/raa/lamning/${Z}`, respond: () => new Response("{}", { status: 404 }) },
+			...standardRoutes(),
+		]);
+		client = c.client;
+		const r = await c.client.callTool({ name: "lamning_dokument", arguments: { id: "00000000-0000-4000-8000-000000000000" } });
+		expect(r.isError).toBe(true);
+		expect((r.content as Content)[0].text).toMatch(/Ingen lämning med UUID 00000000-0000-4000-8000-000000000000 hittades/);
 	});
 
 	it("hamta_dokument: inventeringsboksuppslaget kommer som JPEG-bildinnehåll", async () => {
@@ -194,6 +209,25 @@ describe("verktygen via MCP", () => {
 		expect(s.fil_url).toBe(`https://app.raa.se/open/fornsok/api/lamning/dokument/fil/${encodeURIComponent(FIL_PDF)}/L1946-7415-FMIS_H%C3%84NDELSER.pdf`);
 		expect(s.orsak).toMatch(/JPEG och PNG/);
 		expect(calls.filter((c) => isFilCall(c.url))).toHaveLength(0);
+	});
+
+	it("hamta_dokument: filnamn med ( ) ' ! * hämtas (strikt kodning); med % ges länk i stället för internt fel", async () => {
+		const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10]);
+		const fil = (_n: string) => ({ match: (u: URL) => u.hostname === "app.raa.se" && isFilCall(u), respond: () => new Response(jpeg, { headers: { "content-type": "image/jpeg" } }) });
+		const { client: cl, ref, calls } = await refFor(withList((d) => (d.inventeringsbocker[0].fil.namn = "Bild (1) 'a'!*.jpg"), [fil("x")]));
+		const r = await cl.callTool({ name: "hamta_dokument", arguments: { dokument_ref: ref } });
+		expect(r.isError).toBeFalsy();
+		expect((r.structuredContent as Structured).levererat).toBe("bild");
+		const hamtad = calls.find((c) => isFilCall(c.url));
+		expect(hamtad?.url.pathname).toMatch(/\/Bild%20%281%29%20%27a%27%21%2A\.jpg$/);
+		await cl.close();
+		const p = await refFor(withList((d) => (d.inventeringsbocker[0].fil.namn = "100%.jpg"), [fil("y")]));
+		client = p.client;
+		const r2 = await p.client.callTool({ name: "hamta_dokument", arguments: { dokument_ref: p.ref } });
+		expect(r2.isError).toBeFalsy();
+		expect(r2.structuredContent).toMatchObject({ levererat: "lank" });
+		expect((r2.structuredContent as Structured).orsak).toMatch(/filnamnet innehåller tecken/);
+		expect(p.calls.filter((c) => isFilCall(c.url))).toHaveLength(0);
 	});
 
 	it("hamta_dokument: över 2 MB enligt listan ges som länk utan hämtning", async () => {

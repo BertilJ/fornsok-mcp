@@ -207,6 +207,63 @@ describe.skipIf(!HAS_FALUN)(`Semantisk väg genom hela kedjan med falska AI/Vect
 		expect((ut.content as Array<{ text: string }>)[0].text).toMatch(/Semantisk sökning gäller bara Dalarnas län/);
 	});
 
+	it("sok_lamningar säger när omfånget inte är färdiginbäddat (semantisk_tackning)", async () => {
+		const semantic = createSemanticSearch({ DB: d1FromSqlite(db), AI: ai, VECTORIZE: vec }) ?? undefined;
+		const args = { fraga: "önskekälla", kommun: ["Falun"], antal: 5 };
+		let c = await connectMcp(standardRoutes(), { db: d1FromSqlite(db), semantic });
+		client = c.client;
+		const full = (await c.client.callTool({ name: "sok_lamningar", arguments: args })).structuredContent as S;
+		expect(full.semantisk_tackning).toMatchObject({ fullstandig: true, i_omfang: 3908 });
+		expect(full.anmarkningar.join(" ")).not.toMatch(/inbäddat till/);
+		await c.client.close();
+		const sparade = db.prepare("SELECT * FROM inbaddning ORDER BY uuid LIMIT 1000").all();
+		db.exec("DELETE FROM inbaddning WHERE uuid IN (SELECT uuid FROM inbaddning ORDER BY uuid LIMIT 1000)");
+		try {
+			c = await connectMcp(standardRoutes(), { db: d1FromSqlite(db), semantic });
+			client = c.client;
+			const del = (await c.client.callTool({ name: "sok_lamningar", arguments: args })).structuredContent as S;
+			expect(del.semantisk_tackning).toMatchObject({ fullstandig: false, i_omfang: 3908, inbaddade: 2908 });
+			expect(del.anmarkningar.join(" ")).toMatch(/ansluten, men Dalarnas län är ännu bara inbäddat till 74 % \(2908 av 3908 lämningar\)/);
+			// Bara ordsök: ingen uppgift om täckning.
+			const ord = (await c.client.callTool({ name: "sok_lamningar", arguments: { ...args, lage: "ord" } })).structuredContent as S;
+			expect(ord.semantisk_tackning).toBeUndefined();
+		} finally {
+			const ins = db.prepare("INSERT INTO inbaddning (uuid, rad_hash, innehall_hash, vektorer, status, modell, andrad) VALUES (?, ?, ?, ?, ?, ?, ?)");
+			for (const r of sparade as Array<Record<string, string | number>>) ins.run(r.uuid, r.rad_hash, r.innehall_hash, r.vektorer, r.status, r.modell, r.andrad);
+		}
+	});
+
+	it("sammanslagen sökning: stabil ordning över sidgränser (fast djup), inga dubbletter", async () => {
+		const semantic = createSemanticSearch({ DB: d1FromSqlite(db), AI: ai, VECTORIZE: vec }) ?? undefined;
+		const c = await connectMcp(standardRoutes(), { db: d1FromSqlite(db), semantic });
+		client = c.client;
+		const sida = async (antal: number, n: number) =>
+			((await c.client.callTool({ name: "sok_lamningar", arguments: { fraga: "kolbotten", kommun: ["Falun"], antal, sida: n } })).structuredContent as S).traffar.map((t: S) => t.uuid as string);
+		const sma: string[] = [];
+		for (let n = 8; n <= 13; n++) sma.push(...(await sida(10, n)));
+		const stor = [...(await sida(35, 3)), ...(await sida(35, 4))]; // träff 71–140
+		expect(new Set(sma).size).toBe(sma.length);
+		// Träff 71–130 i den små sidindelningen = samma träffar i den stora.
+		const fran71 = stor.slice(0, 60);
+		expect(sma).toEqual(fran71);
+	});
+
+	it("semantiska filter: kategori och nara översätts för Vectorize, och det som inte går sägs", async () => {
+		const semantic = createSemanticSearch({ DB: d1FromSqlite(db), AI: ai, VECTORIZE: vec }) ?? undefined;
+		const c = await connectMcp(standardRoutes(), { db: d1FromSqlite(db), semantic });
+		client = c.client;
+		const r = (await c.client.callTool({ name: "sok_lamningar", arguments: { fraga: "offerkälla", lage: "betydelse", nara: { lat: 60.7337, lon: 15.4564, radie_m: 2000 } } })).structuredContent as S;
+		expect(r.sokkanaler).toEqual(["betydelse"]);
+		const q = vec.queries.at(-1)?.filter as Record<string, unknown>;
+		expect(q.socken ?? q.kommun).toBeTruthy();
+		expect(r.anmarkningar.join(" ")).toMatch(/kan inte tillämpa nara \(radien\) före likhetssökningen; de prövas på de 100 semantiskt närmaste lämningarna inom de berörda socknarna/);
+		expect(r.anmarkningar.join(" ")).toMatch(/totalen är antalet av de 100 semantiskt närmaste/);
+		expect(r.filter.ord).toBeUndefined();
+		await c.client.callTool({ name: "sok_lamningar", arguments: { fraga: "offerkälla", lage: "betydelse", kommun: ["Falun"], kategori: ["Kult, offer och folktro"] } });
+		const q2 = vec.queries.at(-1)?.filter as Record<string, { $in?: string[] }>;
+		expect(q2.typ?.$in?.length ?? 0).toBeGreaterThan(1);
+	});
+
 	it("hitta_plats är registrerad sist och svarar ur indexet", async () => {
 		const c = await connectMcp(standardRoutes(), { db: d1FromSqlite(db), nominatim: "av" });
 		client = c.client;
@@ -217,5 +274,60 @@ describe.skipIf(!HAS_FALUN)(`Semantisk väg genom hela kedjan med falska AI/Vect
 		expect(r.kalla).toBe("index");
 		expect(r.kandidater.length).toBeGreaterThan(0);
 		expect(c.calls.filter((x) => x.url.hostname === "nominatim.openstreetmap.org")).toHaveLength(0);
+	});
+});
+
+describe("cron och lås (granskningen av synken, punkt 6)", () => {
+	it("synk-cronen känns igen på avgränsat timfält, inte exakt sträng", async () => {
+		const { arSynkCron } = await import("../src/scheduled");
+		expect(arSynkCron("40 3-6 * * *")).toBe(true);
+		expect(arSynkCron("  40  3-6 * * * ")).toBe(true);
+		expect(arSynkCron("45 3,4,5,6 * * *")).toBe(true);
+		expect(arSynkCron("*/5 * * * *")).toBe(false);
+		expect(arSynkCron("*/15 * * * *")).toBe(false);
+		const log: string[] = [];
+		expect(arSynkCron("trasig", (l) => log.push(l))).toBe(false);
+		expect(log[0]).toMatch(/kan inte tolka/);
+	});
+
+	it("låset med utgångstid: en andra körning hoppar över, och ett utgånget lås kan tas", async () => {
+		const { taLas, slappLas, LAS_MS } = await import("../src/scheduled");
+		const { emptyDb, openD1 } = await import("./sync/helpers");
+		const raw = emptyDb();
+		const db = openD1(raw) as unknown as D1Database;
+		const t = Date.parse("2026-11-18T03:40:00Z");
+		expect(await taLas(db, "las_inbaddning", "a", t)).toBe(true);
+		expect(await taLas(db, "las_inbaddning", "b", t + 60_000)).toBe(false);
+		expect(await taLas(db, "las_inbaddning", "b", t + LAS_MS + 1)).toBe(true);
+		await slappLas(db, "las_inbaddning", "a"); // fel token: släpper inte b:s lås
+		expect(await taLas(db, "las_inbaddning", "c", t + LAS_MS + 2)).toBe(false);
+		await slappLas(db, "las_inbaddning", "b");
+		expect(await taLas(db, "las_inbaddning", "c", t + LAS_MS + 3)).toBe(true);
+		raw.close();
+	});
+
+	it("två överlappande körningar: bara en bäddar in", async () => {
+		const { runScheduled } = await import("../src/scheduled");
+		const { emptyDb, openD1 } = await import("./sync/helpers");
+		const raw = emptyDb();
+		const db = openD1(raw) as unknown as D1Database;
+		let pagaende = 0;
+		let max = 0;
+		let korda = 0;
+		const runEmbedBatch = async () => {
+			pagaende++;
+			korda++;
+			max = Math.max(max, pagaende);
+			await new Promise((r) => setTimeout(r, 20));
+			pagaende--;
+			return { inbaddade: 0, vektorer: 0, oforandrade: 0, tomma: 0, borttagna: 0, klar: true, omfang: ["Dalarna"] };
+		};
+		const env = { DB: db, AI: {} as Ai, VECTORIZE: {} as Vectorize } as unknown as WorkerEnv;
+		const deps = { runSync: (async () => { throw new Error("ej här"); }) as never, runEmbedBatch: runEmbedBatch as never, log: () => {} };
+		const [a, b] = await Promise.all([runScheduled("*/5 * * * *", env, deps), runScheduled("*/5 * * * *", env, deps)]);
+		expect(korda).toBe(1);
+		expect(max).toBe(1);
+		expect([a.inbaddning, b.inbaddning]).toContainEqual({ fel: "en annan inbäddningskörning pågår" });
+		raw.close();
 	});
 });

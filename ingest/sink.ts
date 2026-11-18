@@ -9,7 +9,21 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import type { SqlSink } from "./sql.ts";
 
-export const MIGRATION = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations", "0001_init.sql");
+export const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
+export const MIGRATION = join(MIGRATIONS_DIR, "0001_init.sql");
+
+/** Alla migreringar i ordning (0001, 0002, 0003 …): samma schema som i D1. */
+export function migrationFiles(): string[] {
+	return readdirSync(MIGRATIONS_DIR)
+		.filter((f) => /^\d{4}_.*\.sql$/.test(f))
+		.sort()
+		.map((f) => join(MIGRATIONS_DIR, f));
+}
+
+/** Kör alla migreringar mot en lokal databas (de är idempotenta). */
+export function applyMigrations(db: DatabaseSync) {
+	for (const f of migrationFiles()) db.exec(readFileSync(f, "utf8"));
+}
 
 export interface FileInfo {
 	namn: string;
@@ -80,7 +94,7 @@ export class FileSink implements SqlSink {
 	}
 }
 
-/** Kör satserna direkt mot en lokal SQLite-fil, i transaktioner. */
+/** Kör satserna direkt mot en lokal SQLite-fil, i transaktioner (alla migreringar körs först). */
 export class DbSink implements SqlSink {
 	readonly db: DatabaseSync;
 	private seen = new Set<string>();
@@ -96,7 +110,8 @@ export class DbSink implements SqlSink {
 		this.db = new DatabaseSync(path);
 		// D1 har främmande nycklar påslagna som standard (workerd SQLITE_DEFAULT_FOREIGN_KEYS=1).
 		this.db.exec("PRAGMA foreign_keys = ON");
-		this.db.exec(readFileSync(MIGRATION, "utf8"));
+		// Alla migreringar: inläsningen räknar om områdenas sammanfattning (0003) sist.
+		applyMigrations(this.db);
 	}
 
 	beginBatch() {

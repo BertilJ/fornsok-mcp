@@ -6,6 +6,7 @@
 import { type KvLike, KvDocumentSource, KvDomainSource } from "./cache/kv";
 import { userAgent } from "./config";
 import { DomainService } from "./lookup/domains";
+import { FallbackDomainSource, IndexDomainSource } from "./lookup/index_domaner";
 import { FornsokAppSource } from "./sources/fornsokapp/source";
 import { KsamsokSource } from "./sources/ksamsok/source";
 import { OgcSource } from "./sources/ogc/source";
@@ -39,7 +40,8 @@ export interface DepsOptions extends LiveDepsOptions {
 /** Alla beroenden: levande källor, och indexet/semantiken när de finns. */
 export function createDeps(options: DepsOptions = {}): ToolDeps {
 	const { db, semantic, ...live } = options;
-	const deps = createLiveDeps(live);
+	// Namnuppslaget går i första hand mot indexets listor (SPEC 5.1), med appens som reserv.
+	const deps = createLiveDeps({ ...live, domainDb: db });
 	if (db) {
 		deps.index = new IndexAccess(new IndexStore(db), { kv: live.kv });
 		if (semantic) deps.semantic = semantic;
@@ -50,13 +52,16 @@ export function createDeps(options: DepsOptions = {}): ToolDeps {
 }
 
 /** Bara levande källor (etapp 1–2), utan index. */
-export function createLiveDeps(options: LiveDepsOptions = {}): ToolDeps {
-	const { contactUrl, kv, nominatim, ...clientOptions } = options;
+export function createLiveDeps(options: LiveDepsOptions & { domainDb?: D1Like } = {}): ToolDeps {
+	const { contactUrl, kv, nominatim, domainDb, ...clientOptions } = options;
 	const client = new UpstreamClient({ userAgent: userAgent(contactUrl), ...clientOptions });
 	const ksamsok = new KsamsokSource(client);
 	let domains: DomainService;
 	const app = new FornsokAppSource(client, () => domains.get());
-	domains = new DomainService(new KvDomainSource(app, kv));
+	const appDomaner = new KvDomainSource(app, kv);
+	domains = new DomainService(domainDb ? new FallbackDomainSource(new IndexDomainSource(domainDb), appDomaner) : appDomaner);
+	// Namn som saknas i indexets listor (t.ex. ett index med bara en del av landet) prövas mot appens.
+	if (domainDb) domains.reserv = new DomainService(appDomaner);
 	return {
 		search: ksamsok,
 		ids: ksamsok,

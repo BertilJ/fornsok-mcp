@@ -20,6 +20,7 @@
  */
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { strikt } from "./schema";
 import type { KvLike } from "../cache/kv";
 import { publicUrl, userAgent } from "../config";
 import { ToolInputError, UpstreamError } from "../errors";
@@ -28,8 +29,8 @@ import { findLan } from "../lookup/names";
 import type { D1Like } from "../store/d1";
 import { buildFtsQuery } from "../store/fts";
 import { checkAllowed } from "../upstream/allowlist";
-import { type FetchLike, UpstreamClient } from "../upstream/client";
-import { READ_ONLY, ok, runTool } from "./common";
+import { type FetchLike, Semaphore, SemaphoreTimeoutError, UpstreamClient } from "../upstream/client";
+import { READ_ONLY, citat, ok, rad, runTool } from "./common";
 
 export const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
 export const NOMINATIM_TTL_S = 30 * 24 * 60 * 60;
@@ -74,7 +75,7 @@ export function createHittaPlatsDeps(opts: {
 
 // ---------------------------------------------------------------- schema
 
-export const hittaPlatsInput = z.object({
+export const hittaPlatsInput = strikt("hitta_plats", {
 	namn: z
 		.string()
 		.min(1)
@@ -186,28 +187,40 @@ async function rows<T = Row>(db: D1Like, sql: string, ...params: unknown[]): Pro
 	return ((await (params.length ? s.bind(...params) : s).all<T>()).results ?? []) as T[];
 }
 
-/** Villkor: lämningen ligger i kommunen/länet (om angivet). */
-function areaFilter(
-	kommun: string[] | null,
-	lan: string[] | null,
-): { sql: string; params: unknown[] } {
-	const parts: string[] = [];
-	const params: unknown[] = [];
-	for (const [niva, namn] of [
-		["kommun", kommun],
-		["lan", lan],
-	] as const) {
-		if (!namn) continue;
-		parts.push(
-			"l.id IN (SELECT lo2.lamning_id FROM lamning_omrade lo2 JOIN omrade o2 ON o2.id = lo2.omrade_id WHERE o2.niva = ? AND o2.namn IN (SELECT value FROM json_each(?)))",
-		);
-		params.push(niva, JSON.stringify(namn));
-	}
-	return { sql: parts.length ? ` AND ${parts.join(" AND ")}` : "", params };
-}
-
 // ---------------------------------------------------------------- indexet
 
+/** Fel i indexdelen av hitta_plats, med vilken fråga som fallerade och hur lång tid den tog. */
+export class PlatsIndexError extends Error {
+	readonly steg: string;
+	readonly ms: number;
+	constructor(message: string, steg: string, ms: number, options?: { cause?: unknown }) {
+		super(message);
+		this.name = "PlatsIndexError";
+		this.steg = steg;
+		this.ms = ms;
+		if (options?.cause !== undefined) (this as { cause?: unknown }).cause = options.cause;
+	}
+}
+
+async function steg<T>(namn: string, fn: () => Promise<T>): Promise<T> {
+	const t0 = Date.now();
+	try {
+		return await fn();
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		const hint = /no such table: omrade_(sammanfattning|relation)/.test(msg) ? " (migreringen 0003_omraden.sql är inte körd)" : "";
+		throw new PlatsIndexError(`${namn}: ${msg}${hint}`, namn, Date.now() - t0, { cause: e });
+	}
+}
+
+/**
+ * Kandidater ur indexet. Tre små frågor, alla indexdrivna:
+ * 1. Socknar och kommuner med namnet: omrade (unikt index på niva, namn) och
+ *    den förberäknade sammanfattningen (migrations/0003_omraden.sql).
+ * 2. Kommun och län för dem: omrade_relation.
+ * 3. Namngivna lämningar: FTS5 med kolumnfiltret namn som yttre loop; exakt
+ *    namn först. Avgränsning till kommun/län prövas per kandidat (EXISTS).
+ */
 export async function sokIndex(
 	db: D1Like,
 	namn: string,
@@ -215,33 +228,46 @@ export async function sokIndex(
 	lan: string | null,
 ): Promise<Kandidat[]> {
 	const varianter = JSON.stringify(namnvarianter(namn));
-	const kommunV = kommun ? namnvarianter(kommun) : null;
-	const lanV = lan ? [lan] : null;
-	const af = areaFilter(kommunV, lanV);
+	const kommunV = kommun ? JSON.stringify(namnvarianter(kommun)) : null;
+	const lanV = lan ? JSON.stringify([lan]) : null;
 
-	// Socknar och kommuner: mittpunkt och utbredning av områdets lämningar.
-	const omr = await rows(
-		db,
-		`SELECT o.id, o.niva, o.namn, o.lan, count(*) AS n, avg(l.lat) AS lat, avg(l.lon) AS lon,
-		        min(l.lat) AS min_lat, max(l.lat) AS max_lat, min(l.lon) AS min_lon, max(l.lon) AS max_lon
-		   FROM omrade o JOIN lamning_omrade lo ON lo.omrade_id = o.id JOIN lamning l ON l.id = lo.lamning_id
-		  WHERE o.niva IN ('socken', 'kommun') AND o.namn IN (SELECT value FROM json_each(?)) AND l.lat IS NOT NULL${af.sql}
-		  GROUP BY o.id ORDER BY CASE o.niva WHEN 'kommun' THEN 0 ELSE 1 END, n DESC LIMIT ?`,
-		varianter,
-		...af.params,
-		MAX_KANDIDATER,
+	// 1. Socknar och kommuner. Avgränsning: kommunen själv, eller ett överordnat område med namnet.
+	const avgr: string[] = [];
+	const avgrParams: unknown[] = [];
+	for (const [niva, v] of [
+		["kommun", kommunV],
+		["lan", lanV],
+	] as const) {
+		if (!v) continue;
+		avgr.push(
+			`(${niva === "kommun" ? "(o.niva = 'kommun' AND o.namn IN (SELECT value FROM json_each(?))) OR " : ""}EXISTS (SELECT 1 FROM omrade_relation r JOIN omrade o2 ON o2.id = r.overordnad_id WHERE r.omrade_id = o.id AND o2.niva = '${niva}' AND o2.namn IN (SELECT value FROM json_each(?))))`,
+		);
+		if (niva === "kommun") avgrParams.push(v);
+		avgrParams.push(v);
+	}
+	const omr = await steg("socknar och kommuner", () =>
+		rows(
+			db,
+			`SELECT o.id, o.niva, o.namn, o.lan, s.med_lage AS n, s.lat, s.lon, s.min_lat, s.max_lat, s.min_lon, s.max_lon
+			   FROM omrade o JOIN omrade_sammanfattning s ON s.omrade_id = o.id
+			  WHERE o.niva IN ('socken', 'kommun') AND o.namn IN (SELECT value FROM json_each(?)) AND s.med_lage > 0${avgr.length ? ` AND ${avgr.join(" AND ")}` : ""}
+			  ORDER BY CASE o.niva WHEN 'kommun' THEN 0 ELSE 1 END, s.med_lage DESC LIMIT ?`,
+			varianter,
+			...avgrParams,
+			MAX_KANDIDATER,
+		),
 	);
-	// Kommun och län där områdets lämningar oftast ligger.
+
+	// 2. Kommun och län där områdets lämningar oftast ligger.
 	const ctx = new Map<number, { kommun: string | null; lan: string | null }>();
 	if (omr.length) {
-		const ids = JSON.stringify(omr.map((o) => o.id));
-		const c = await rows(
-			db,
-			`SELECT lo.omrade_id AS oid, o2.niva, o2.namn, count(*) AS n
-			   FROM lamning_omrade lo JOIN lamning_omrade lo2 ON lo2.lamning_id = lo.lamning_id JOIN omrade o2 ON o2.id = lo2.omrade_id
-			  WHERE lo.omrade_id IN (SELECT value FROM json_each(?)) AND o2.niva IN ('kommun', 'lan')
-			  GROUP BY lo.omrade_id, o2.id ORDER BY n DESC`,
-			ids,
+		const c = await steg("överordnade områden", () =>
+			rows(
+				db,
+				`SELECT r.omrade_id AS oid, o2.niva, o2.namn FROM omrade_relation r JOIN omrade o2 ON o2.id = r.overordnad_id
+				  WHERE r.omrade_id IN (SELECT value FROM json_each(?)) ORDER BY r.antal DESC, o2.namn`,
+				JSON.stringify(omr.map((o) => o.id)),
+			),
 		);
 		for (const r of c) {
 			const oid = Number(r.oid);
@@ -270,37 +296,43 @@ export async function sokIndex(
 			antal_lamningar: n,
 			lamningsnummer: null,
 			url: null,
-			utbredning: [num(o.min_lon), num(o.min_lat), num(o.max_lon), num(o.max_lat)].every(
-				(x) => x !== null,
-			)
-				? [
-						round(o.min_lon as number, 5),
-						round(o.min_lat as number, 5),
-						round(o.max_lon as number, 5),
-						round(o.max_lat as number, 5),
-					]
+			utbredning: [num(o.min_lon), num(o.min_lat), num(o.max_lon), num(o.max_lat)].every((x) => x !== null)
+				? [round(o.min_lon as number, 5), round(o.min_lat as number, 5), round(o.max_lon as number, 5), round(o.max_lat as number, 5)]
 				: null,
 		});
 	}
 
-	// Namngivna lämningar: exakt namn först, sedan ordträff i namnet.
-	if (out.length < MAX_KANDIDATER) {
-		const fts = buildFtsQuery(namn);
-		const lamningar = await rows(
-			db,
-			`SELECT l.id, l.uuid, l.lamningsnummer, l.lamningstyp, l.namn, l.lat, l.lon,
-			        CASE WHEN l.namn IN (SELECT value FROM json_each(?)) THEN 0 ELSE 1 END AS exakt,
-			        (SELECT o.namn FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE lo.lamning_id = l.id AND o.niva = 'kommun' LIMIT 1) AS kommun,
-			        (SELECT o.namn FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE lo.lamning_id = l.id AND o.niva = 'lan' LIMIT 1) AS lan
-			   FROM lamning l
-			  WHERE l.lat IS NOT NULL AND l.namn IS NOT NULL
-			    AND (l.namn IN (SELECT value FROM json_each(?))${fts ? " OR l.id IN (SELECT rowid FROM lamning_fts WHERE lamning_fts MATCH ?)" : ""})${af.sql}
-			  ORDER BY exakt, l.id LIMIT ?`,
-			varianter,
-			varianter,
-			...(fts ? [`namn : (${fts.match})`] : []),
-			...af.params,
-			MAX_KANDIDATER - out.length,
+	// 3. Namngivna lämningar: exakt namn först, sedan ordträff i namnet.
+	const fts = buildFtsQuery(namn);
+	if (out.length < MAX_KANDIDATER && fts) {
+		const lamAvgr: string[] = [];
+		const lamParams: unknown[] = [];
+		for (const [niva, v] of [
+			["kommun", kommunV],
+			["lan", lanV],
+		] as const) {
+			if (!v) continue;
+			lamAvgr.push(
+				`EXISTS (SELECT 1 FROM lamning_omrade lo2 JOIN omrade o2 ON o2.id = lo2.omrade_id WHERE lo2.lamning_id = l.id AND o2.niva = '${niva}' AND o2.namn IN (SELECT value FROM json_each(?)))`,
+			);
+			lamParams.push(v);
+		}
+		// CROSS JOIN: FTS-tabellen är yttre loop (bara lämningar med orden i namnet prövas).
+		const lamningar = await steg("namngivna lämningar", () =>
+			rows(
+				db,
+				`SELECT l.id, l.uuid, l.lamningsnummer, l.lamningstyp, l.namn, l.lat, l.lon,
+				        CASE WHEN l.namn IN (SELECT value FROM json_each(?)) THEN 0 ELSE 1 END AS exakt,
+				        (SELECT o.namn FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE lo.lamning_id = l.id AND o.niva = 'kommun' LIMIT 1) AS kommun,
+				        (SELECT o.namn FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE lo.lamning_id = l.id AND o.niva = 'lan' LIMIT 1) AS lan
+				   FROM lamning_fts f CROSS JOIN lamning l ON l.id = f.rowid
+				  WHERE f.lamning_fts MATCH ? AND l.lat IS NOT NULL AND l.namn IS NOT NULL${lamAvgr.length ? ` AND ${lamAvgr.join(" AND ")}` : ""}
+				  ORDER BY exakt, l.id LIMIT ?`,
+				varianter,
+				`namn : (${fts.match})`,
+				...lamParams,
+				MAX_KANDIDATER - out.length,
+			),
 		);
 		for (const l of lamningar) {
 			const lat = num(l.lat);
@@ -314,10 +346,7 @@ export async function sokIndex(
 				...geo(lat, lon),
 				kommun: str(l.kommun),
 				lan: str(l.lan),
-				beskrivning:
-					Number(l.exakt) === 0
-						? "Lämning med namnet i registret."
-						: "Lämning vars namn innehåller sökorden.",
+				beskrivning: Number(l.exakt) === 0 ? "Lämning med namnet i registret." : "Lämning vars namn innehåller sökorden.",
 				antal_lamningar: null,
 				lamningsnummer: str(l.lamningsnummer),
 				url: publicUrl(uuid),
@@ -330,32 +359,42 @@ export async function sokIndex(
 
 // ---------------------------------------------------------------- Nominatim
 
-let koSlut: Promise<void> = Promise.resolve();
+/**
+ * Nominatim-anropen i isolatet: högst ett åt gången (Semaphore, samma mönster
+ * som uppströmsklienten: ingen överlämning mellan förfrågningar, tidsgräns på
+ * väntan, en plats som hållits för länge återtas), och minst 1,1 s mellan
+ * anropen. Tidigare väntade varje anrop på ett löfte som föregående förfrågan
+ * löste i sin `finally`; avbröts den kunde alla senare anrop vänta för alltid.
+ */
+let ko = new Semaphore(1, { maxHoldMs: 20_000, maxWaitMs: 15_000, pollMs: 50 });
 let senasteAnrop = 0;
 
-/** Kör `fn` tidigast 1,1 s efter föregående Nominatim-anrop i isolatet (anropen köas). */
+/** Kör `fn` tidigast 1,1 s efter föregående Nominatim-anrop i isolatet. */
 async function iTur<T>(deps: HittaPlatsDeps, fn: () => Promise<T>): Promise<T> {
 	const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 	const now = deps.now ?? Date.now;
-	const fore = koSlut;
-	let klar: () => void = () => {};
-	koSlut = new Promise<void>((r) => {
-		klar = r;
-	});
 	try {
-		await fore;
-		const vanta = senasteAnrop + NOMINATIM_MIN_MELLANRUM_MS - now();
-		if (vanta > 0) await sleep(vanta);
-		senasteAnrop = now();
-		return await fn();
-	} finally {
-		klar();
+		return await ko.run(async () => {
+			const vanta = senasteAnrop + NOMINATIM_MIN_MELLANRUM_MS - now();
+			if (vanta > 0) await sleep(Math.min(vanta, NOMINATIM_MIN_MELLANRUM_MS));
+			senasteAnrop = now();
+			return fn();
+		});
+	} catch (e) {
+		if (e instanceof SemaphoreTimeoutError) throw new UpstreamError("nominatim", "OpenStreetMap Nominatim är upptaget av andra frågor just nu");
+		throw e;
 	}
 }
 
 /** Bara för test: nollställ kön. */
 export function aterstallNominatimKo(): void {
-	koSlut = Promise.resolve();
+	ko = new Semaphore(1, { maxHoldMs: 20_000, maxWaitMs: 15_000, pollMs: 50 });
+	senasteAnrop = 0;
+}
+
+/** Bara för test: kön med egna gränser. */
+export function sattNominatimKo(opts: { maxHoldMs?: number; maxWaitMs?: number; pollMs?: number }): void {
+	ko = new Semaphore(1, opts);
 	senasteAnrop = 0;
 }
 
@@ -513,9 +552,15 @@ export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 			kandidater = await sokIndex(deps.db, namn, kommun, lan);
 			if (kandidater.length) kalla = "index";
 		} catch (e) {
-			console.warn(
-				"hitta_plats: indexet svarade inte:",
-				e instanceof Error ? e.message : String(e),
+			// Loggas som fel (syns i wrangler tail och Workers-loggarna), med steg och tid.
+			console.error(
+				JSON.stringify({
+					hitta_plats: "indexfrågan misslyckades",
+					namn,
+					steg: e instanceof PlatsIndexError ? e.steg : null,
+					ms: e instanceof PlatsIndexError ? e.ms : null,
+					fel: e instanceof Error ? e.message : String(e),
+				}),
 			);
 			anmarkningar.push("Indexet svarade inte; sökte i OpenStreetMap i stället.");
 		}
@@ -571,7 +616,7 @@ export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 					? ` (${k.antal_lamningar} lämningar)`
 					: "";
 			lines.push(
-				`${i + 1}. ${k.namn} – ${k.typ}${omradeText ? `, ${omradeText}` : ""}: ${k.lat.toFixed(5)}, ${k.lon.toFixed(5)}.${extra}`.trim(),
+				`${i + 1}. ${citat(k.namn)} – ${rad(k.typ)}${omradeText ? `, ${rad(omradeText)}` : ""}: ${k.lat.toFixed(5)}, ${k.lon.toFixed(5)}.${extra}`.trim(),
 			);
 		});
 		lines.push("Koordinaten kan skickas direkt till lamningar_nara (lat, lon).");

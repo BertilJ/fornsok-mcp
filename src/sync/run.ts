@@ -21,7 +21,7 @@
  * som den skrivs, och att skriva samma post igen ger samma rader.
  *
  * Grundladdning/avstämning (ingest/): när `synk_status.uttagsdatum` ändras
- * (ny GeoPackage-fil inläst) flyttas markören tillbaka till dagen före
+ * (ny GeoPackage-fil inläst) flyttas markören tillbaka till två dagar före
  * uttagsdatum, så att ändringar som filen kanske inte hann få med skrivs igen.
  * En avstämning med en äldre fil kan alltså inte ta bort nyare synkade
  * ändringar för gott.
@@ -30,11 +30,13 @@ import { KvDomainSource, type KvLike } from "../cache/kv";
 import { FORNSOK_APP_API, userAgent } from "../config";
 import { UpstreamError } from "../errors";
 import { wgsToSweref } from "../geo/geometry";
-import { inScope, parseScope, type Scope } from "../semantic/scope";
+import { checkedScope, inScope, type Scope } from "../semantic/scope";
 import { FornsokAppSource } from "../sources/fornsokapp/source";
 import { KsamsokSource } from "../sources/ksamsok/source";
 import type { Domaner } from "../sources/types";
+import { sparaKopiaSats } from "../lookup/index_domaner";
 import type { D1Like, D1LikeStatement } from "../store/d1";
+import { refreshInaktuella } from "../store/omraden";
 import { type FetchLike, UpstreamClient } from "../upstream/client";
 import { arDatum, dagarMellan, laggTillDagar, senasteKlaraDag, stockholmNu } from "./datum";
 import { FLODE_SIDSTORLEK, hamtaFlode } from "./flode";
@@ -95,6 +97,8 @@ export interface SyncResult {
 	kvar: number;
 	/** Lämningar markerade för ny inbäddning. */
 	markerade: number;
+	/** Områden vars sammanfattning räknades om (src/store/omraden.ts). */
+	omraden?: { omraknade: number; kvar: number };
 	fel: string[];
 }
 
@@ -110,6 +114,16 @@ interface KoRad {
 	utgar: number;
 	status: string;
 	forsok: number;
+	andrad: string;
+}
+
+/** Så många poster i rad som fallerar på infrastrukturfel i början av en körning avbryter den (strömbrytare). */
+export const STROMBRYTARE_POSTER = 5;
+
+/** Infrastrukturfel (5xx, 429, tidsgräns, nätverk) – inte fel på posten. Förbrukar inga försök. */
+function arInfrafel(e: unknown): boolean {
+	if (!(e instanceof UpstreamError)) return false;
+	return e.status === undefined || e.status === 429 || e.status >= 500;
 }
 
 const sleepReal = (ms: number) =>
@@ -161,7 +175,16 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 	const maxForsok = Math.max(1, opts.maxForsok ?? 5);
 	const maxTidMs = opts.maxTidMs ?? 10 * 60 * 1000;
 	const idag = stockholmNu(now).datum;
-	const scope: Scope = parseScope(env.SEMANTIC_LAN);
+	// Ogiltigt omfång: synken skriver lämningarna men markerar inget för inbäddning
+	// (inbäddningen gör ändå ingenting förrän SEMANTIC_LAN är rättat).
+	let scope: Scope | null = null;
+	let omfangFel: string | null = null;
+	try {
+		scope = checkedScope(env.SEMANTIC_LAN);
+	} catch (e) {
+		omfangFel = e instanceof Error ? e.message : String(e);
+		console.error(`synk: ${omfangFel}`);
+	}
 
 	const client = new UpstreamClient({
 		userAgent: userAgent(env.CONTACT_URL),
@@ -176,6 +199,12 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 		if (!register) {
 			const d: Domaner = await domaner.loadDomaner();
 			register = new OmradesRegister(d);
+			// Spara listorna i D1, så att namnuppslaget klarar sig när appen är nere.
+			try {
+				await db.batch([sparaKopiaSats(db, d)]);
+			} catch (e) {
+				console.warn("synk: värdelistorna kunde inte sparas i D1:", e instanceof Error ? e.message : String(e));
+			}
 		}
 		return register;
 	};
@@ -195,6 +224,7 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 		fel: [],
 	};
 
+	if (omfangFel) res.fel.push(`${omfangFel} Inga lämningar markerades för inbäddning.`);
 	try {
 		// ------------------------------------------------ 1. läget
 		const status = new Map<string, string | null>();
@@ -233,7 +263,8 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 		if (!intervall) {
 			let uttagAttSatta: string | null = null;
 			if (uttag && uttag !== status.get(STATUS_UTTAG_SETT)) {
-				// Ny GeoPackage-laddning: synka om från dagen före uttagsdatum.
+				// Ny GeoPackage-laddning: synka om från två dagar före uttagsdatum (marginal för
+				// ändringar som filen kanske inte hann få med).
 				const tillbaka = laggTillDagar(uttag, -2);
 				if (!markor || tillbaka < markor) markor = tillbaka;
 				uttagAttSatta = uttag;
@@ -276,7 +307,7 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 		// ------------------------------------------------ 3. kön
 		const ko = await rows<KoRad>(
 			db,
-			`SELECT uuid, typer, utgar, status, forsok FROM synk_ko
+			`SELECT uuid, typer, utgar, status, forsok, andrad FROM synk_ko
 			  WHERE status = 'vantar' OR substr(andrad, 1, 10) < ?
 			  ORDER BY CASE status WHEN 'vantar' THEN 0 ELSE 1 END, datum, uuid LIMIT ?`,
 			idag,
@@ -284,7 +315,15 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 		);
 		let skrivna = 0;
 		let forstaAnrop = true;
+		// Strömbrytare: fallerar de första posterna alla på infrastrukturfel är RAÄ nere;
+		// då avbryts körningen i stället för att pröva hela kön.
+		let infraIRad = 0;
+		let natSvar = false;
 		for (const k of ko) {
+			if (!natSvar && infraIRad >= STROMBRYTARE_POSTER) {
+				res.fel.push(`strömbrytare: de ${infraIRad} första posterna fallerade på infrastrukturfel (RAÄ svarar inte); avbryter och försöker nästa körning`);
+				break;
+			}
 			if (Date.now() - t0 > maxTidMs) {
 				res.fel.push("tidsgränsen nåddes; fortsätter nästa körning");
 				break;
@@ -299,7 +338,7 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 					0;
 				await db.batch([
 					...taBortSatser(db, k.uuid),
-					markeraSats(db, k.uuid, "utgar", false, tid),
+					...(scope ? [markeraSats(db, k.uuid, "utgar", false, tid)] : []),
 					taUr,
 				]);
 				if (fanns) res.borttagna++;
@@ -319,8 +358,15 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 			}
 			if (!forstaAnrop) await sleep(pausMs);
 			forstaAnrop = false;
-			const forsok = k.forsok + 1;
-			const misslyckat = async (nyStatus: "vantar" | "saknas", fel: string) => {
+			// Försök räknas per kalenderdag (fyra körningar per natt ska inte förbruka fyra),
+			// och infrastrukturfel räknas inte alls (se misslyckat).
+			const nyDag = k.forsok === 0 || !k.andrad || k.andrad.slice(0, 10) < idag;
+			let forsok = k.forsok + (nyDag ? 1 : 0);
+			const misslyckat = async (nyStatus: "vantar" | "saknas", fel: string, infra = false) => {
+				if (infra) {
+					infraIRad++;
+					forsok = k.forsok;
+				} else natSvar = true;
 				if (forsok >= maxForsok) {
 					res.fel.push(
 						`${k.uuid}: ${fel}; gav upp efter ${forsok} försök (avstämningen rättar)`,
@@ -339,14 +385,17 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 
 			let byggd: ByggdPost | null = null;
 			let appFel: string | null = null;
+			let appInfra = false;
+			let app404 = false;
 			try {
 				const r = await client.get(`${FORNSOK_APP_API}/lamning/lamning/${k.uuid}`);
 				if (r.status === 404) {
-					await misslyckat("saknas", "Fornsök-appen känner inte till lämningen (404)");
-					continue;
-				}
-				if (r.status >= 400) appFel = `Fornsök-appen svarade ${r.status}`;
-				else {
+					app404 = true;
+					appFel = "Fornsök-appen känner inte till lämningen (404)";
+				} else if (r.status >= 400) {
+					appFel = `Fornsök-appen svarade ${r.status}`;
+					appInfra = r.status === 429 || r.status >= 500;
+				} else {
 					try {
 						byggd = appTillPost(JSON.parse(r.body) as Record<string, unknown>, idag);
 					} catch {
@@ -357,25 +406,68 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 			} catch (e) {
 				if (!(e instanceof UpstreamError)) throw e;
 				appFel = e.message;
+				appInfra = arInfrafel(e);
+			}
+
+			if (app404) {
+				// Appen känner inte till posten, och flödet säger inte UTGAR. K-samsöks (äldre) post
+				// skrivs inte – den kan vara en nyss borttagen lämning. Efter maxForsok dagar avgör
+				// K-samsök: saknas posten där också tas den bort ur indexet (annars låg den kvar,
+				// sökbar); finns den där lämnas den åt avstämningen.
+				natSvar = true;
+				if (forsok < maxForsok) {
+					await misslyckat("saknas", appFel ?? "404");
+					continue;
+				}
+				let ksFinns: boolean | null = null;
+				try {
+					ksFinns = (await ksamsok.getByUuid(k.uuid)) !== null;
+				} catch (e) {
+					if (!(e instanceof UpstreamError)) throw e;
+				}
+				if (ksFinns === null) {
+					// K-samsök svarade inte: pröva igen nästa dag, utan att ge upp.
+					await db.batch([db.prepare("UPDATE synk_ko SET status = 'saknas', senaste_fel = ?, andrad = ? WHERE uuid = ?").bind("404 i appen; K-samsök svarade inte", tid, k.uuid)]);
+					continue;
+				}
+				if (!ksFinns) {
+					const fanns = (await rows(db, "SELECT 1 AS x FROM lamning WHERE uuid = ?", k.uuid)).length > 0;
+					await db.batch([...taBortSatser(db, k.uuid), ...(scope ? [markeraSats(db, k.uuid, "saknas", false, tid)] : []), taUr]);
+					const msg = `${k.uuid}: finns varken i Fornsök-appen (404) eller K-samsök efter ${forsok} dagar; borttagen ur indexet`;
+					console.warn(`synk: ${msg}`);
+					res.fel.push(msg);
+					if (fanns) res.borttagna++;
+				} else {
+					await db.batch([taUr]);
+					const msg = `${k.uuid}: 404 i Fornsök-appen i ${forsok} dagar men finns i K-samsök; lämnas åt avstämningen`;
+					console.warn(`synk: ${msg}`);
+					res.fel.push(msg);
+				}
+				skrivna++;
+				continue;
 			}
 
 			let reserv = false;
 			if (!byggd) {
 				// Reserv: K-samsök (SPEC 8). Posten prövas mot appen igen nästa dag.
+				let ksInfra = false;
+				let ksSaknar = false;
 				try {
 					const ks = await ksamsok.getByUuid(k.uuid);
 					if (ks) {
 						byggd = ksamsokTillPost(ks.post, ks.geometriWgs ?? null, idag, wgsToSweref);
 						reserv = true;
-					}
+					} else ksSaknar = true;
 				} catch (e) {
 					if (!(e instanceof UpstreamError)) throw e;
+					ksInfra = arInfrafel(e);
 				}
 				if (!byggd) {
-					await misslyckat("vantar", appFel ?? "okänt fel");
+					await misslyckat("vantar", appFel ?? "okänt fel", appInfra && (ksInfra || ksSaknar));
 					continue;
 				}
 			}
+			natSvar = true;
 
 			const rad = await tillRad(byggd.post, reserv ? RESERV_HASH_PREFIX : "");
 			const fore = await rows<{ hash: string }>(
@@ -383,7 +475,7 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 				"SELECT hash FROM lamning WHERE uuid = ?",
 				k.uuid,
 			);
-			const iOmfang = inScope(scope, splitList(byggd.post.lan));
+			const iOmfang = scope ? inScope(scope, splitList(byggd.post.lan)) : false;
 			if (!reserv && fore[0]?.hash === rad.rad.hash) {
 				// Oförändrad (t.ex. omkörning): ingen skrivning, bara ur kön.
 				await db.batch([taUr]);
@@ -398,7 +490,7 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 				reg.kategorierFor(rad.rad.lamningstyp),
 				{ reserv },
 			);
-			satser.push(markeraSats(db, k.uuid, fore.length ? "andrad" : "ny", iOmfang, tid));
+			if (scope) satser.push(markeraSats(db, k.uuid, fore.length ? "andrad" : "ny", iOmfang, tid));
 			if (reserv) {
 				satser.push(
 					forsok >= maxForsok
@@ -416,6 +508,16 @@ export async function runSync(env: SyncEnv, opts: SyncOptions = {}): Promise<Syn
 			if (fore.length) res.andrade++;
 			else res.nya++;
 			skrivna++;
+		}
+
+		// ------------------------------------------------ 3b. områdenas sammanfattning
+		// Områden som skrivna eller borttagna lämningar låg i räknas om (hitta_plats,
+		// statistik). Ett fel här hindrar inte synken; nästa körning tar dem.
+		try {
+			const o = await refreshInaktuella(db);
+			if (o.omraknade || o.kvar) res.omraden = o;
+		} catch (e) {
+			res.fel.push(`områdenas sammanfattning kunde inte räknas om: ${e instanceof Error ? e.message : String(e)}`);
 		}
 
 		// ------------------------------------------------ 4. klart?

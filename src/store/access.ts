@@ -18,6 +18,15 @@ export const FAIL_TTL_MS = 15_000;
 export const EGENSKAPER_TTL_MS = 60 * 60 * 1000;
 export const EGENSKAPER_KV_TTL_S = 24 * 60 * 60;
 export const EGENSKAPER_KEY = "egenskaper:v1";
+/** Inbäddningsläget (andel av omfånget) cachas så länge i minnet. */
+export const INBADDNING_TTL_MS = 10 * 60 * 1000;
+
+export interface InbaddningsLage {
+	i_omfang: number;
+	inbaddade: number;
+	/** true när alla lämningar i omfånget har en rad i `inbaddning`. */
+	fullstandig: boolean;
+}
 
 export type IndexOpen =
 	| { ok: true; store: IndexStore; status: IndexStatus; hamtad_fran: string }
@@ -39,12 +48,19 @@ function datum(s: string | null): string | null {
  * Hur färskt indexet är, som text till `hamtad_fran` (SPEC 7): "index
  * ÅÅÅÅ-MM-DD" med det senaste av uttagsdatum och senaste nattsynk.
  */
-export function indexHamtadFran(s: IndexStatus): string {
+export function indexHamtadFran(s: IndexStatus, nu?: Date): string {
 	const uttag = datum(s.uttagsdatum);
 	const synk = datum(s.senast_synkat);
 	const d = [uttag, synk].filter((x): x is string => !!x).sort().pop();
 	if (!d) return "index (datum okänt)";
-	return synk && synk === d && synk !== uttag ? `index ${d} (nattsynk; uttag ${uttag ?? "okänt"})` : `index ${d}`;
+	const bas = synk && synk === d && synk !== uttag ? `index ${d} (nattsynk; uttag ${uttag ?? "okänt"})` : `index ${d}`;
+	// Nattsynken synkar t.o.m. gårdagen; ligger den mer än två dygn efter syns det för användaren
+	// (tidigare bara som LARM i loggen).
+	if (synk && nu) {
+		const dygn = Math.floor((Date.parse(`${nu.toISOString().slice(0, 10)}T00:00:00Z`) - Date.parse(`${synk}T00:00:00Z`)) / 86_400_000) - 1;
+		if (dygn > 2) return `${bas}; obs: nattsynken släpar ${dygn} dygn – nyare ändringar i registret saknas`;
+	}
+	return bas;
 }
 
 /** Text till `hamtad_fran` i reservläget. */
@@ -56,6 +72,7 @@ export class IndexAccess {
 	private cached: { value: IndexOpen; at: number } | null = null;
 	private inflight: Promise<IndexOpen> | null = null;
 	private egenskapCache: { value: EgenskapRad[]; at: number } | null = null;
+	private inbaddningCache: { key: string; value: InbaddningsLage; at: number } | null = null;
 
 	constructor(
 		readonly store: IndexStore,
@@ -89,8 +106,12 @@ export class IndexAccess {
 	private async load(): Promise<IndexOpen> {
 		try {
 			const status = await this.store.status();
-			if (!status.laddad) return { ok: false, orsak: "indexet är tomt (inte laddat)" };
-			return { ok: true, store: this.store, status, hamtad_fran: indexHamtadFran(status) };
+			if (!status.laddad)
+				return {
+					ok: false,
+					orsak: status.har_rader ? "indexets grundladdning är inte avslutad (markören senaste_grundladdning saknas)" : "indexet är tomt (inte laddat)",
+				};
+			return { ok: true, store: this.store, status, hamtad_fran: indexHamtadFran(status, new Date(this.now())) };
 		} catch (err) {
 			console.error("index: lägeskontrollen misslyckades:", err instanceof Error ? err.message : String(err));
 			return { ok: false, orsak: "indexet svarade inte" };
@@ -101,6 +122,18 @@ export class IndexAccess {
 	reportFailure(err: unknown): void {
 		console.error("index: frågan misslyckades, reservläge en stund:", err instanceof Error ? err.message : String(err));
 		this.cached = { value: { ok: false, orsak: "indexanropet misslyckades" }, at: this.now() };
+	}
+
+	/** Hur stor del av omfånget som är inbäddat (cachat INBADDNING_TTL_MS). Kastar vid fel i D1. */
+	async inbaddning(lan: string[]): Promise<InbaddningsLage> {
+		const key = [...lan].sort().join(",");
+		const t = this.now();
+		const c = this.inbaddningCache;
+		if (c && c.key === key && t - c.at < INBADDNING_TTL_MS && t >= c.at) return c.value;
+		const r = await this.store.inbaddningsLage(lan);
+		const value = { ...r, fullstandig: r.inbaddade >= r.i_omfang };
+		this.inbaddningCache = { key, value, at: t };
+		return value;
 	}
 
 	/**

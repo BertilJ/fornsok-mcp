@@ -216,7 +216,8 @@ export interface NearbySource {
 export interface Lamningstyp {
 	id: number;
 	namn: string;
-	aktiv: boolean;
+	/** Saknas när listan kommer ur indexet (som inte vet om typen är inaktiv). */
+	aktiv?: boolean;
 	kategorier: string[];
 }
 export interface Kommun {
@@ -248,6 +249,8 @@ export interface Domaner {
 	landskap: Landskap[];
 	lan: Lan[];
 	hamtad: string;
+	/** Varifrån listorna kom: indexet eller Fornsök-appen (saknas = appen). */
+	kalla?: "index" | "fornsokapp";
 }
 
 export interface DomainSource {
@@ -372,4 +375,6 @@ export interface SemanticSearch {
 	scopeCovers(filter: ResolvedSearchFilter): boolean;
 	/** Beskrivning av omfånget för felmeddelanden, t.ex. "Dalarnas län". */
 	readonly omfang?: string;
+	/** Länen i omfånget (indexets kortnamn), för att visa hur mycket som är inbäddat. */
+	readonly lan?: string[];
 }

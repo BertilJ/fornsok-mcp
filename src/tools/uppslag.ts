@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { strikt } from "./schema";
 import { LAN, normalizeName } from "../lookup/names";
 import { READ_ONLY, type ToolDeps, ok, runTool } from "./common";
 import { viaIndex } from "./via_index";
@@ -7,7 +8,7 @@ import { viaIndex } from "./via_index";
 const LISTOR = ["lamningstyper", "kategorier", "bedomningar", "egenskapstyper", "kommuner", "socknar", "landskap", "lan"] as const;
 const MAX_ROWS = 200;
 
-export const uppslagInput = z.object({
+export const uppslagInput = strikt("uppslag", {
 	lista: z.enum(LISTOR).describe("Vilken värdelista."),
 	sok: z.string().min(1).max(100).optional().describe("Delsträng att filtrera på (skiftlägesokänsligt)."),
 });
@@ -79,6 +80,7 @@ export async function uppslag(args: UppslagArgs, deps: ToolDeps) {
 		);
 	} else {
 		const d = await deps.domains.get();
+		if (d.kalla === "index") kalla = "Lämningsindex (D1): namn och koder som förekommer i registret";
 		switch (args.lista) {
 			case "lamningstyper":
 				varden = d.lamningstyper.map((t) => ({ namn: t.namn, kategori: t.kategorier, aktiv: t.aktiv }));

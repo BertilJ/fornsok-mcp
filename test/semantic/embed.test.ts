@@ -3,7 +3,7 @@
  * D1 ersatt av node:sqlite (migreringarna 0001 + 0002).
  */
 import type { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MODELL } from "../../src/semantic/bindings";
 import { AI_BATCH, embedStatus, runEmbedBatch } from "../../src/semantic/embed";
 import { createSemanticSearch, semanticSearch } from "../../src/semantic/search";
@@ -15,6 +15,11 @@ const STANDARDFRAS =
 	"Beskrivningen är inte kvalitetssäkrad. Information kan saknas, vara felaktig eller inaktuell. Se även Inventeringsbok.";
 
 let seq = 0;
+let avstamningar = 0;
+/** Som en avstämning med inläsningen: raderna ändras direkt och markören senaste_avstamning flyttas. */
+function avstam(db: DatabaseSync): void {
+	db.prepare("INSERT INTO synk_status (nyckel, varde, andrad) VALUES ('senaste_avstamning', ?, 't') ON CONFLICT(nyckel) DO UPDATE SET varde = excluded.varde").run(`2026-11-18T00:00:${String(++avstamningar).padStart(2, "0")}Z`);
+}
 function uuidN(n: number): string {
 	return `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 }
@@ -80,6 +85,42 @@ describe("runEmbedBatch", () => {
 		seq = 0;
 	});
 	afterEach(() => db.close());
+
+	it("felstavat eller tomt SEMANTIC_LAN: inbäddningen kastar och tar inte bort någon vektor", async () => {
+		insertLamning(db, { uuid: uuidN(1), beskrivning: "Fångstgrop, 3 m i diameter." });
+		await runEmbedBatch(env());
+		const fore = vec.store.size;
+		expect(fore).toBeGreaterThan(0);
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			for (const lan of ["Dalarn", " , ", "Dalarna,Atlantis"]) {
+				await expect(runEmbedBatch(env(lan))).rejects.toThrow(/SEMANTIC_LAN/);
+				expect(vec.store.size).toBe(fore);
+			}
+			expect(String(err.mock.calls[0][0])).toMatch(/Dalarn/);
+		} finally {
+			err.mockRestore();
+		}
+		expect((db.prepare("SELECT count(*) AS c FROM inbaddning").get() as { c: number }).c).toBe(1);
+	});
+
+	it("felstavat SEMANTIC_LAN i nattsynken: lämningarna skrivs men inget markeras, och felet syns", async () => {
+		const raa = fakeRaa();
+		raa.flode.set("2026-11-11", [flodePost(UUID.L2001_646, "L2001:646", ["NY"])]);
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const r = await runSync(
+				{ DB: openD1(db), SEMANTIC_LAN: "Dalarn" },
+				{ now: new Date("2026-11-12T04:00:00Z"), fetch: raa.fetch, sleep: async () => {}, pausMs: 0 },
+			);
+			expect(r.nya).toBe(1);
+			expect(r.markerade).toBe(0);
+			expect(r.fel.join(" ")).toMatch(/SEMANTIC_LAN innehåller län som inte gick att tolka: "Dalarn"/);
+		} finally {
+			err.mockRestore();
+		}
+		expect((db.prepare("SELECT count(*) AS c FROM inbaddning_ko").get() as { c: number }).c).toBe(0);
+	});
 
 	it("bäddar in lämningar inom omfånget efter nattsynken, i delar som kan återupptas", async () => {
 		const raa = fakeRaa();
@@ -196,6 +237,7 @@ describe("runEmbedBatch", () => {
 			`DELETE FROM lamning_omrade WHERE lamning_id = (SELECT id FROM lamning WHERE uuid = '${uuidN(1)}') AND omrade_id = (SELECT id FROM omrade WHERE niva = 'socken' AND namn = 'Sundborn')`,
 		);
 		db.exec(`UPDATE lamning SET hash = 'ny' WHERE uuid = '${uuidN(1)}'`);
+		avstam(db);
 		const r = await runEmbedBatch(env());
 		expect(r.inbaddade).toBe(1);
 		expect(vec.store.has(`${uuidN(1)}#1`)).toBe(false);
@@ -207,21 +249,25 @@ describe("runEmbedBatch", () => {
 		ai.calls = [];
 		// Ny radhash (t.ex. efter avstämningen) men samma text: ingen ny inbäddning.
 		db.exec(`UPDATE lamning SET hash = 'avstamd', lat = 61 WHERE uuid = '${uuidN(1)}'`);
+		avstam(db);
 		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 0, oforandrade: 1 });
 		expect(ai.calls).toEqual([]);
 		// Ändrad text: ny inbäddning.
 		db.exec(
 			`UPDATE lamning SET hash = 'ny', beskrivning = 'Kolbotten, oval, 14 m lång.' WHERE uuid = '${uuidN(1)}'`,
 		);
+		avstam(db);
 		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 1 });
 		// Ändrad bedömning (metadata): ny inbäddning.
 		db.exec(
 			`UPDATE lamning SET hash = 'ny2', bedomning = 'Övrig kulturhistorisk lämning' WHERE uuid = '${uuidN(1)}'`,
 		);
+		avstam(db);
 		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 1 });
 		expect(vec.store.get(uuidN(1))?.metadata.bedomning).toBe("Övrig kulturhistorisk lämning");
 		// Annan modell i bokföringen: allt bäddas om.
 		db.exec("UPDATE inbaddning SET modell = '@cf/annan/modell'");
+		avstam(db);
 		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 1 });
 		expect(db.prepare("SELECT modell FROM inbaddning").get()).toEqual({ modell: MODELL });
 	});
@@ -257,13 +303,76 @@ describe("runEmbedBatch", () => {
 		expect(db.prepare("SELECT uuid FROM inbaddning").all()).toEqual([{ uuid: uuidN(4) }]);
 	});
 
-	it("bokför inget när Workers AI fallerar (nästa körning tar samma lämningar)", async () => {
+	it("Workers AI fallerar för en lämning: felet bokförs, inget bäddas in, nästa körning försöker igen", async () => {
 		insertLamning(db, { uuid: uuidN(1), beskrivning: "Kolbotten, rund, 12 m diam." });
 		ai.fail = true;
-		await expect(runEmbedBatch(env())).rejects.toThrow(/AI nere/);
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 0, fel: 1 });
+		} finally {
+			err.mockRestore();
+		}
 		expect(db.prepare("SELECT count(*) AS n FROM inbaddning").get()).toEqual({ n: 0 });
+		expect(db.prepare("SELECT forsok FROM inbaddning_fel").get()).toEqual({ forsok: 1 });
 		ai.fail = false;
 		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 1, klar: true });
+	});
+
+	it("en text som modellen avvisar blockerar inte resten: delen halveras, posten hoppas över efter tre försök", async () => {
+		for (let i = 1; i <= 60; i++) insertLamning(db, { uuid: uuidN(i), beskrivning: i === 7 ? "TRASIG beskrivning av en fångstgrop, rund, 3 m i diameter." : `Fångstgrop nummer ${i}, rund, 3 m i diameter.` });
+		ai.failIf = (t) => t.includes("TRASIG");
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const a = await runEmbedBatch(env());
+			expect(a).toMatchObject({ inbaddade: 59, fel: 1, klar: false });
+			await runEmbedBatch(env());
+			await runEmbedBatch(env());
+			expect(db.prepare("SELECT forsok FROM inbaddning_fel WHERE uuid = ?").get(uuidN(7))).toEqual({ forsok: 3 });
+			// Fjärde körningen: hoppas över, inget AI-anrop, och omfånget räknas som klart.
+			const anrop = ai.calls.length;
+			expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 0, klar: true });
+			expect(ai.calls.length).toBe(anrop);
+			expect(String(err.mock.calls[0][0])).toMatch(/Workers AI fallerade för 50 texter/);
+		} finally {
+			err.mockRestore();
+			warn.mockRestore();
+		}
+		expect(vec.store.size).toBeGreaterThanOrEqual(59);
+	});
+
+	it("Workers AI helt nere: körningen ger upp efter ett begränsat antal anrop", async () => {
+		for (let i = 1; i <= 120; i++) insertLamning(db, { uuid: uuidN(i), beskrivning: `Fångstgrop nummer ${i}, rund, 3 m i diameter.` });
+		ai.fail = true;
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await expect(runEmbedBatch(env())).rejects.toThrow(/fallerade 12 gånger i körningen/);
+		} finally {
+			err.mockRestore();
+		}
+		expect(db.prepare("SELECT count(*) AS n FROM inbaddning").get()).toEqual({ n: 0 });
+	});
+
+	it("oväntad svarsform från Workers AI: felet beskriver formen, inte innehållet", async () => {
+		const { vektorerUrSvar, svaretsForm } = await import("../../src/semantic/bindings");
+		expect(svaretsForm({ shape: [2, 1024], data: [[0.1, 0.2]] })).toBe("{shape: array(2)<number>, data: array(1)<array(2)>}");
+		expect(() => vektorerUrSvar({ response: [[1, 2]] }, 1)).toThrow(/svarets form: \{response: array\(1\)<array\(2\)>\}/);
+		expect(() => vektorerUrSvar({ data: "hemligt innehåll" }, 1)).toThrow(/svarets form: \{data: string\}/);
+	});
+
+	it("färdiginbäddat och oförändrat: nästa körning gör inga genomsökningar av omfånget", async () => {
+		insertLamning(db, { uuid: uuidN(1), beskrivning: "Kolbotten, rund, 12 m diam." });
+		expect(await runEmbedBatch(env())).toMatchObject({ klar: true });
+		const { d1FromSqlite } = await import("../store/d1-adapter");
+		const sql: string[] = [];
+		const logged = { DB: d1FromSqlite(db, (q) => sql.push(q)), AI: ai, VECTORIZE: vec, SEMANTIC_LAN: "Dalarna" };
+		expect(await runEmbedBatch(logged)).toMatchObject({ klar: true, inbaddade: 0 });
+		expect(sql.some((q) => q.includes("FROM lamning l"))).toBe(false);
+		// En ny avstämning gör att omfånget gås igenom igen.
+		avstam(db);
+		sql.length = 0;
+		await runEmbedBatch(logged);
+		expect(sql.some((q) => q.includes("FROM lamning l"))).toBe(true);
 	});
 
 	it("kräver bindningarna", async () => {

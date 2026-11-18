@@ -39,11 +39,26 @@ export type _AiIsAiLike = Assert<Ai extends AiLike ? true : false>;
 export type _VectorizeIsVectorizeLike = Assert<Vectorize extends VectorizeLike ? true : false>;
 
 /** Plocka ut vektorerna ur bge-m3:s svar ({ shape, data }) och kontrollera formen. */
+/**
+ * Svarets form, utan innehåll: typer, nycklar och längder (för loggen, så att
+ * det syns vad den riktiga tjänsten svarar om formen avviker från den väntade).
+ */
+export function svaretsForm(x: unknown, djup = 0): string {
+	if (x === null) return "null";
+	if (Array.isArray(x)) return `array(${x.length})${x.length && djup < 2 ? `<${svaretsForm(x[0], djup + 1)}>` : ""}`;
+	if (typeof x === "object") {
+		if (djup >= 2) return "object";
+		const keys = Object.keys(x as object).slice(0, 12);
+		return `{${keys.map((k) => `${k}: ${svaretsForm((x as Record<string, unknown>)[k], djup + 1)}`).join(", ")}}`;
+	}
+	return typeof x;
+}
+
 export function vektorerUrSvar(svar: unknown, antal: number): number[][] {
 	const data = (svar as { data?: unknown } | null)?.data;
 	if (!Array.isArray(data) || data.length !== antal) {
 		throw new Error(
-			`Workers AI: oväntat svar (väntade ${antal} vektorer, fick ${Array.isArray(data) ? data.length : "inga"})`,
+			`Workers AI: oväntat svar (väntade ${antal} vektorer, fick ${Array.isArray(data) ? data.length : "inga"}); svarets form: ${svaretsForm(svar)}`,
 		);
 	}
 	for (const v of data) {
@@ -52,7 +67,7 @@ export function vektorerUrSvar(svar: unknown, antal: number): number[][] {
 			v.length !== DIMENSIONER ||
 			!v.every((x) => typeof x === "number" && Number.isFinite(x))
 		) {
-			throw new Error(`Workers AI: vektor med fel form (väntade ${DIMENSIONER} tal)`);
+			throw new Error(`Workers AI: vektor med fel form (väntade ${DIMENSIONER} tal); svarets form: ${svaretsForm(svar)}`);
 		}
 	}
 	return data as number[][];

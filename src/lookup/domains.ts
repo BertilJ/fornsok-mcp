@@ -33,7 +33,21 @@ export function domanerProblem(d: Domaner | null | undefined): string | null {
 	return null;
 }
 
+/** Okänt namn (inte flertydigt): DomainService prövar då reservlistan, om den finns. */
+export class OkantNamnError extends ToolInputError {
+	constructor(message: string, details?: Record<string, unknown>) {
+		super(message, details);
+		this.name = "OkantNamnError";
+	}
+}
+
 export class DomainService {
+	/**
+	 * Reserv för namn som saknas i listorna (t.ex. Fornsök-appens listor när de
+	 * primära kommer ur ett index som bara har en del av landet). Prövas bara vid
+	 * okänt namn; går den inte att nå gäller det ursprungliga felet (med förslag).
+	 */
+	reserv?: DomainService;
 	private cache: { value: Domaner; at: number } | null = null;
 	private inflight: Promise<Domaner> | null = null;
 	private failure: { error: unknown; at: number } | null = null;
@@ -98,29 +112,48 @@ export class DomainService {
 		}
 	}
 
+	private async reservVid<T>(e: unknown, f: (r: DomainService) => Promise<T>): Promise<T> {
+		if (!(e instanceof OkantNamnError) || !this.reserv) throw e;
+		try {
+			return await f(this.reserv);
+		} catch (e2) {
+			if (e2 instanceof ToolInputError) throw e2;
+			console.warn("värdelistor: reservlistan gick inte att nå:", e2 instanceof Error ? e2.message : String(e2));
+			throw e;
+		}
+	}
+
 	async resolveLamningstyper(names: readonly string[]): Promise<string[]> {
-		const d = await this.get();
-		const all = d.lamningstyper.map((t) => t.namn);
-		return names.map((input) => {
-			const hit = all.find((n) => normalizeName(n) === normalizeName(input));
-			if (hit) return hit;
-			throw new ToolInputError(
-				`Okänd lämningstyp "${input}".${didYouMean(suggest(input, all))} Använd verktyget uppslag med lista "lamningstyper" för alla typer.`,
-			);
-		});
+		try {
+			const d = await this.get();
+			const all = d.lamningstyper.map((t) => t.namn);
+			return names.map((input) => {
+				const hit = all.find((n) => normalizeName(n) === normalizeName(input));
+				if (hit) return hit;
+				throw new OkantNamnError(
+					`Okänd lämningstyp "${input}".${didYouMean(suggest(input, all))} Använd verktyget uppslag med lista "lamningstyper" för alla typer.`,
+				);
+			});
+		} catch (e) {
+			return this.reservVid(e, (r) => r.resolveLamningstyper(names));
+		}
 	}
 
 	/** Kategorier (exakta namn) med närmaste förslag vid okänt namn. */
 	async resolveKategorier(names: readonly string[]): Promise<string[]> {
-		const d = await this.get();
-		const all = d.kategorier.length ? d.kategorier : [...new Set(d.lamningstyper.flatMap((t) => t.kategorier))];
-		return names.map((input) => {
-			const hit = all.find((n) => normalizeName(n) === normalizeName(input));
-			if (hit) return hit;
-			throw new ToolInputError(
-				`Okänd kategori "${input}".${didYouMean(suggest(input, all))} Använd verktyget uppslag med lista "kategorier" för alla kategorier.`,
-			);
-		});
+		try {
+			const d = await this.get();
+			const all = d.kategorier.length ? d.kategorier : [...new Set(d.lamningstyper.flatMap((t) => t.kategorier))];
+			return names.map((input) => {
+				const hit = all.find((n) => normalizeName(n) === normalizeName(input));
+				if (hit) return hit;
+				throw new OkantNamnError(
+					`Okänd kategori "${input}".${didYouMean(suggest(input, all))} Använd verktyget uppslag med lista "kategorier" för alla kategorier.`,
+				);
+			});
+		} catch (e) {
+			return this.reservVid(e, (r) => r.resolveKategorier(names));
+		}
 	}
 
 	/** Alla lämningstyper (även inaktiva, som finns kvar på äldre poster) i någon av kategorierna. */
@@ -131,23 +164,31 @@ export class DomainService {
 	}
 
 	async resolveKommuner(names: readonly string[]): Promise<Kommun[]> {
-		const d = await this.get();
-		return names.map((input) => {
-			const q = normalizeName(input).replace(/ kommun$/, "");
-			const hit = d.kommuner.find((k) => normalizeName(k.namn) === q || k.kod === q);
-			if (hit) return hit;
-			throw new ToolInputError(`Okänd kommun "${input}".${didYouMean(suggest(q, d.kommuner.map((k) => k.namn)))}`);
-		});
+		try {
+			const d = await this.get();
+			return names.map((input) => {
+				const q = normalizeName(input).replace(/ kommun$/, "");
+				const hit = d.kommuner.find((k) => normalizeName(k.namn) === q || k.kod === q);
+				if (hit) return hit;
+				throw new OkantNamnError(`Okänd kommun "${input}".${didYouMean(suggest(q, d.kommuner.map((k) => k.namn)))}`);
+			});
+		} catch (e) {
+			return this.reservVid(e, (r) => r.resolveKommuner(names));
+		}
 	}
 
 	async resolveLandskap(names: readonly string[]): Promise<string[]> {
-		const d = await this.get();
-		return names.map((input) => {
-			const q = normalizeName(input).replace(/ landskap$/, "");
-			const hit = d.landskap.find((l) => normalizeName(l.namn) === q || normalizeName(l.kod) === q);
-			if (hit) return hit.namn;
-			throw new ToolInputError(`Okänt landskap "${input}".${didYouMean(suggest(q, d.landskap.map((l) => l.namn)))}`);
-		});
+		try {
+			const d = await this.get();
+			return names.map((input) => {
+				const q = normalizeName(input).replace(/ landskap$/, "");
+				const hit = d.landskap.find((l) => normalizeName(l.namn) === q || normalizeName(l.kod) === q);
+				if (hit) return hit.namn;
+				throw new OkantNamnError(`Okänt landskap "${input}".${didYouMean(suggest(q, d.landskap.map((l) => l.namn)))}`);
+			});
+		} catch (e) {
+			return this.reservVid(e, (r) => r.resolveLandskap(names));
+		}
 	}
 
 	/** Län via fast tabell (behöver inga värdelistor). */
@@ -187,88 +228,92 @@ export class DomainService {
 		inputs: readonly string[],
 		kontext: { kommunkoder?: string[]; lan?: string[] } = {},
 	): Promise<ResolvedSocken[]> {
-		const d = await this.get();
-		return inputs.map((input) => {
-			let raw = input.trim();
-			let qualifier: string | null = null;
-			const paren = /^(.*?)\s*\((.+)\)\s*$/.exec(raw);
-			const comma = /^([^,]+),\s*(.+)$/.exec(raw);
-			if (paren) [, raw, qualifier] = paren;
-			else if (comma) [, raw, qualifier] = comma;
-			const q = normalizeName(raw).replace(/ (socken|sn|församling)$/, "");
-			let candidates = d.socknar.filter((s) => normalizeName(s.namn) === q);
-			if (candidates.length === 0) {
-				throw new ToolInputError(`Okänd socken "${input}".${didYouMean(suggest(q, [...new Set(d.socknar.map((s) => s.namn))]))}`);
-			}
-			const nationallyUnique = candidates.length === 1;
-			if (nationallyUnique && qualifier) {
-				// En kvalificerare som motsäger en entydig socken ska inte tas tyst.
-				const s = candidates[0];
-				const qual = qualifier;
-				const lan = findLan(qual);
-				const kommun = d.kommuner.find((k) => normalizeName(k.namn) === normalizeName(qual).replace(/ kommun$/, ""));
-				const matches = (lan && this.lanForSocken(s).includes(lan.namn)) || (kommun && s.kommunkoder.includes(kommun.kod));
-				if (!matches) {
-					throw new ToolInputError(
-						`Socknen "${s.namn}" finns bara i ${this.describeSocken(s, d)}, inte i "${qual}". Ange socknen utan kvalificerare eller med rätt län/kommun.`,
-						{ kandidater: [this.describeSocken(s, d)] },
+		try {
+			const d = await this.get();
+			return inputs.map((input) => {
+				let raw = input.trim();
+				let qualifier: string | null = null;
+				const paren = /^(.*?)\s*\((.+)\)\s*$/.exec(raw);
+				const comma = /^([^,]+),\s*(.+)$/.exec(raw);
+				if (paren) [, raw, qualifier] = paren;
+				else if (comma) [, raw, qualifier] = comma;
+				const q = normalizeName(raw).replace(/ (socken|sn|församling)$/, "");
+				let candidates = d.socknar.filter((s) => normalizeName(s.namn) === q);
+				if (candidates.length === 0) {
+					throw new OkantNamnError(`Okänd socken "${input}".${didYouMean(suggest(q, [...new Set(d.socknar.map((s) => s.namn))]))}`);
+				}
+				const nationallyUnique = candidates.length === 1;
+				if (nationallyUnique && qualifier) {
+					// En kvalificerare som motsäger en entydig socken ska inte tas tyst.
+					const s = candidates[0];
+					const qual = qualifier;
+					const lan = findLan(qual);
+					const kommun = d.kommuner.find((k) => normalizeName(k.namn) === normalizeName(qual).replace(/ kommun$/, ""));
+					const matches = (lan && this.lanForSocken(s).includes(lan.namn)) || (kommun && s.kommunkoder.includes(kommun.kod));
+					if (!matches) {
+						throw new ToolInputError(
+							`Socknen "${s.namn}" finns bara i ${this.describeSocken(s, d)}, inte i "${qual}". Ange socknen utan kvalificerare eller med rätt län/kommun.`,
+							{ kandidater: [this.describeSocken(s, d)] },
+						);
+					}
+				}
+				if (candidates.length > 1 && qualifier) {
+					const qual = qualifier;
+					const lan = findLan(qual);
+					const kommun = d.kommuner.find((k) => normalizeName(k.namn) === normalizeName(qual).replace(/ kommun$/, ""));
+					candidates = candidates.filter(
+						(s) => (lan && this.lanForSocken(s).includes(lan.namn)) || (kommun && s.kommunkoder.includes(kommun.kod)),
 					);
 				}
-			}
-			if (candidates.length > 1 && qualifier) {
-				const qual = qualifier;
-				const lan = findLan(qual);
-				const kommun = d.kommuner.find((k) => normalizeName(k.namn) === normalizeName(qual).replace(/ kommun$/, ""));
-				candidates = candidates.filter(
-					(s) => (lan && this.lanForSocken(s).includes(lan.namn)) || (kommun && s.kommunkoder.includes(kommun.kod)),
-				);
-			}
-			if (candidates.length > 1 && kontext.kommunkoder?.length) {
-				const narrowed = candidates.filter((s) => s.kommunkoder.some((k) => kontext.kommunkoder?.includes(k)));
-				if (narrowed.length) candidates = narrowed;
-			}
-			if (candidates.length > 1 && kontext.lan?.length) {
-				const narrowed = candidates.filter((s) => this.lanForSocken(s).some((l) => kontext.lan?.includes(l)));
-				if (narrowed.length) candidates = narrowed;
-			}
-			if (candidates.length === 0) {
-				const all = d.socknar.filter((s) => normalizeName(s.namn) === q);
-				throw new ToolInputError(
-					`Ingen socken "${raw}" i "${qualifier}". Kandidater: ${all.map((s) => this.describeSocken(s, d)).join("; ")}.`,
-					{ kandidater: all.map((s) => this.describeSocken(s, d)) },
-				);
-			}
-			if (candidates.length > 1) {
-				const list = candidates.map((s) => this.describeSocken(s, d));
-				throw new ToolInputError(
-					`Socknen "${input}" är flertydig – ${candidates.length} socknar heter så: ${list.join("; ")}. Ange län eller kommun, t.ex. "${candidates[0].namn} (${this.lanForSocken(candidates[0])[0] ?? "län"})".`,
-					{ kandidater: list },
-				);
-			}
-			const s = candidates[0];
-			if (nationallyUnique) return { namn: s.namn, id: s.id };
-			const lan = this.lanForSocken(s);
-			const out: ResolvedSocken = { namn: s.namn, id: s.id, lan };
-			// Samma namn i samma län (t.ex. Mo, Råda, Torp i Västra Götaland): län räcker inte,
-			// K-samsök har inget socken-id – avgränsa även på socknens kommuner.
-			const sameLan = d.socknar.filter((x) => x !== s && normalizeName(x.namn) === q && this.lanForSocken(x).some((l) => lan.includes(l)));
-			if (sameLan.length) {
-				const kommunNamn = (koder: string[]) =>
-					[...new Set(koder.map((k) => d.kommuner.find((x) => x.kod === k)?.namn).filter((x): x is string => !!x))];
-				out.kommun = kommunNamn(s.kommunkoder);
-				const andras = new Set(sameLan.flatMap((x) => x.kommunkoder));
-				const delade = kommunNamn(s.kommunkoder.filter((k) => andras.has(k)));
-				if (out.kommun.length === 0) {
-					delete out.kommun;
-					out.anmarkning = `Det finns flera socknar som heter ${s.namn} i ${lan.join("/")}, och socknens kommun är okänd; träffarna kan omfatta alla.`;
-				} else if (delade.length) {
-					out.anmarkning = `Det finns flera socknar som heter ${s.namn} i ${lan.join("/")}; avgränsat till kommun ${out.kommun.join(", ")}, men ${delade.join(", ")} har också en annan socken ${s.namn}, så träffar där kan höra till den.`;
-				} else {
-					out.anmarkning = `Det finns flera socknar som heter ${s.namn} i ${lan.join("/")}; avgränsat till kommun ${out.kommun.join(", ")}.`;
+				if (candidates.length > 1 && kontext.kommunkoder?.length) {
+					const narrowed = candidates.filter((s) => s.kommunkoder.some((k) => kontext.kommunkoder?.includes(k)));
+					if (narrowed.length) candidates = narrowed;
 				}
-			}
-			return out;
-		});
+				if (candidates.length > 1 && kontext.lan?.length) {
+					const narrowed = candidates.filter((s) => this.lanForSocken(s).some((l) => kontext.lan?.includes(l)));
+					if (narrowed.length) candidates = narrowed;
+				}
+				if (candidates.length === 0) {
+					const all = d.socknar.filter((s) => normalizeName(s.namn) === q);
+					throw new ToolInputError(
+						`Ingen socken "${raw}" i "${qualifier}". Kandidater: ${all.map((s) => this.describeSocken(s, d)).join("; ")}.`,
+						{ kandidater: all.map((s) => this.describeSocken(s, d)) },
+					);
+				}
+				if (candidates.length > 1) {
+					const list = candidates.map((s) => this.describeSocken(s, d));
+					throw new ToolInputError(
+						`Socknen "${input}" är flertydig – ${candidates.length} socknar heter så: ${list.join("; ")}. Ange län eller kommun, t.ex. "${candidates[0].namn} (${this.lanForSocken(candidates[0])[0] ?? "län"})".`,
+						{ kandidater: list },
+					);
+				}
+				const s = candidates[0];
+				if (nationallyUnique) return { namn: s.namn, id: s.id };
+				const lan = this.lanForSocken(s);
+				const out: ResolvedSocken = { namn: s.namn, id: s.id, lan };
+				// Samma namn i samma län (t.ex. Mo, Råda, Torp i Västra Götaland): län räcker inte,
+				// K-samsök har inget socken-id – avgränsa även på socknens kommuner.
+				const sameLan = d.socknar.filter((x) => x !== s && normalizeName(x.namn) === q && this.lanForSocken(x).some((l) => lan.includes(l)));
+				if (sameLan.length) {
+					const kommunNamn = (koder: string[]) =>
+						[...new Set(koder.map((k) => d.kommuner.find((x) => x.kod === k)?.namn).filter((x): x is string => !!x))];
+					out.kommun = kommunNamn(s.kommunkoder);
+					const andras = new Set(sameLan.flatMap((x) => x.kommunkoder));
+					const delade = kommunNamn(s.kommunkoder.filter((k) => andras.has(k)));
+					if (out.kommun.length === 0) {
+						delete out.kommun;
+						out.anmarkning = `Det finns flera socknar som heter ${s.namn} i ${lan.join("/")}, och socknens kommun är okänd; träffarna kan omfatta alla.`;
+					} else if (delade.length) {
+						out.anmarkning = `Det finns flera socknar som heter ${s.namn} i ${lan.join("/")}; avgränsat till kommun ${out.kommun.join(", ")}, men ${delade.join(", ")} har också en annan socken ${s.namn}, så träffar där kan höra till den.`;
+					} else {
+						out.anmarkning = `Det finns flera socknar som heter ${s.namn} i ${lan.join("/")}; avgränsat till kommun ${out.kommun.join(", ")}.`;
+					}
+				}
+				return out;
+			});
+		} catch (e) {
+			return this.reservVid(e, (r) => r.resolveSocknar(inputs, kontext));
+		}
 	}
 }
 

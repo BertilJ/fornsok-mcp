@@ -76,7 +76,7 @@ export class FornsokAppSource implements RecordSource, DomainSource, DocumentSou
 
 	filUrl(fil: DokumentFil): string | null {
 		if (!FIL_ID_RE.test(fil.id) || /[/\\]/.test(fil.namn)) return null;
-		return `${FORNSOK_APP_API}/lamning/dokument/fil/${encodeURIComponent(fil.id)}/${encodeURIComponent(fil.namn)}`;
+		return `${FORNSOK_APP_API}/lamning/dokument/fil/${kodaStrikt(fil.id)}/${kodaStrikt(fil.namn)}`;
 	}
 
 	async hamtaBild(fil: DokumentFil, maxBytes: number): Promise<DokumentFilSvar> {
@@ -105,4 +105,9 @@ export class FornsokAppSource implements RecordSource, DomainSource, DocumentSou
 		if (!Array.isArray(data)) throw new UpstreamError("fornsokapp", "Fornsök-appens versionshistorik hade oväntad form", raw.status);
 		return parseVersioner(data);
 	}
+}
+
+/** encodeURIComponent och dessutom ! ' ( ) * (RFC 3986), som listan över tillåtna anrop kräver kodade. */
+export function kodaStrikt(x: string): string {
+	return encodeURIComponent(x).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }

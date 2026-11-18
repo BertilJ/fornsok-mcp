@@ -21,8 +21,11 @@ export function bagOfWords(text: string): number[] {
 export class FakeAi implements AiLike {
 	calls: string[][] = [];
 	fail = false;
+	/** Fallera anropet om någon text uppfyller villkoret (en text som modellen avvisar). */
+	failIf?: (text: string) => boolean;
 	async run(_model: "@cf/baai/bge-m3", inputs: { text: string[]; truncate_inputs?: boolean }) {
 		if (this.fail) throw new Error("AI nere");
+		if (this.failIf && inputs.text.some(this.failIf)) throw new Error("AiError: 3010: Invalid input");
 		this.calls.push(inputs.text);
 		return {
 			shape: [inputs.text.length, 1024],

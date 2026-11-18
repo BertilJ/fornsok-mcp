@@ -91,3 +91,34 @@ describe("IndexAccess", () => {
 		expect(store.egenskaper).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("IndexStore.status: slutmarkören krävs (granskningen av åtkomst, punkt 2)", () => {
+	it("rader utan senaste_grundladdning/avstämning räknas inte som laddat, och reservläget säger varför", async () => {
+		const { DatabaseSync } = await import("node:sqlite");
+		const { applyMigrations } = await import("../../ingest/sink.ts");
+		const { IndexStore } = await import("../../src/store/index");
+		const { d1FromSqlite } = await import("./d1-adapter");
+		const db = new DatabaseSync(":memory:");
+		applyMigrations(db);
+		db.exec("INSERT INTO lamning (uuid, hash) VALUES ('00000000-0000-4000-8000-000000000001', 'h')");
+		const store = new IndexStore(d1FromSqlite(db));
+		expect(await store.status()).toMatchObject({ laddad: false, har_rader: true });
+		const o = await new IndexAccess(store).open();
+		expect(o).toMatchObject({ ok: false, orsak: expect.stringMatching(/grundladdning är inte avslutad/) });
+		db.exec("INSERT INTO synk_status (nyckel, varde) VALUES ('senaste_grundladdning', '2026-11-17T21:00:00Z')");
+		expect(await store.status()).toMatchObject({ laddad: true });
+		db.close();
+	});
+});
+
+describe("hamtad_fran visar när nattsynken släpar (granskningen av synken, punkt 7)", () => {
+	it("mer än två dygn efter: anmärkning i hamtad_fran", () => {
+		const s = status({ senast_synkat: "2026-11-10" });
+		expect(indexHamtadFran(s, new Date("2026-11-12T10:00:00Z"))).toBe("index 2026-11-17");
+		const gammal = status({ uttagsdatum: "2026-11-01", senast_synkat: "2026-11-10" });
+		expect(indexHamtadFran(gammal, new Date("2026-11-13T10:00:00Z"))).not.toMatch(/släpar/);
+		expect(indexHamtadFran(gammal, new Date("2026-11-14T10:00:00Z"))).toBe(
+			"index 2026-11-10 (nattsynk; uttag 2026-11-01); obs: nattsynken släpar 3 dygn – nyare ändringar i registret saknas",
+		);
+	});
+});

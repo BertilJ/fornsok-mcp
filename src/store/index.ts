@@ -24,7 +24,7 @@ import type {
 	Sweref,
 } from "../sources/types";
 import { type D1Like, type D1LikeStatement, IndexError, IndexInputError } from "./d1";
-import { buildFilter, type IndexSearchFilter, normLamningsnummer, normRaa, where } from "./filter";
+import { buildFilter, type FilterPart, type IndexSearchFilter, normLamningsnummer, normRaa, spatialPart, where } from "./filter";
 import type { FtsQuery } from "./fts";
 import { boxAround, checkedPlanar, spatialCondition, type SqlPart, type SwerefBox, wgsBoxToSweref } from "./spatial";
 
@@ -41,6 +41,19 @@ export const MAX_KANDIDATER = 5000;
 export const MAX_ANTAL = 100;
 export const MAX_OFFSET = 10_000;
 export const MAX_STATISTIK_RADER = 200;
+/**
+ * Fler ordträffar än så rangordnas inte med bm25 (att räkna bm25 för ett
+ * vanligt ord som "och", 485 000 träffar, tar 0,4 s lokalt och mer i D1);
+ * träffarna visas då i registerordning och svaret säger det.
+ */
+export const MAX_RANKAD = 150_000;
+/**
+ * Statistik som inte kan räknas ur de förberäknade tabellerna görs bara för
+ * högst så många lämningar: två nivåer (cirka 7 µs per lämning lokalt), och en
+ * nivå område eller kategori med filter (cirka 2 µs per lämning).
+ */
+export const MAX_STATISTIK_LAMNINGAR = 50_000;
+export const MAX_STATISTIK_LAMNINGAR_EN_NIVA = 150_000;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -67,6 +80,11 @@ export interface IndexSearchPage extends SearchPage {
 	sokord: string[];
 	/** true om `totalt` är en undre gräns (fler kandidater än MAX_KANDIDATER med `nara`). */
 	totalt_ungefar?: boolean;
+	/**
+	 * false när filtret gav fler än MAX_RANKAD träffar: ordningen är då indexets
+	 * (ungefär registrets) ordning, inte relevans (med sökord) eller lämningsnummer (utan).
+	 */
+	rangordnad?: false;
 }
 
 export interface NearbyIndexQuery {
@@ -108,8 +126,13 @@ export interface NearbyIndexPage {
 
 /** Indexets läge ur synk_status (SPEC 5.2, 7): finns data, och hur färskt är det. */
 export interface IndexStatus {
-	/** true om minst en lämning finns. */
+	/**
+	 * true om minst en lämning finns OCH inläsningen skrivit sin slutmarkör
+	 * (`senaste_grundladdning` eller `senaste_avstamning` i synk_status).
+	 */
 	laddad: boolean;
+	/** true om minst en lämning finns (även efter en avbruten grundladdning). */
+	har_rader?: boolean;
 	/** GeoPackage-filens uttagsdatum vid senaste grundladdning/avstämning (ÅÅÅÅ-MM-DD). */
 	uttagsdatum: string | null;
 	/** Senaste lyckade nattsynk (nyckeln `senast_synkat`, ISO-tid eller datum), om nattsynken skrivit den. */
@@ -130,6 +153,7 @@ export interface RankedPage {
 	ids: RankedId[];
 	sokord: string[];
 	totalt_ungefar?: boolean;
+	rangordnad?: false;
 }
 
 export const STATISTIK_DIMENSIONER = ["typ", "kategori", "bedomning", "lan", "kommun", "socken", "landskap"] as const;
@@ -182,7 +206,23 @@ export function compareLamningsnummer(a: string | null, b: string | null): numbe
 }
 
 const RANK = "bm25(lamning_fts, 4.0, 4.0, 1.0, 2.0, 0.5)";
-const SNIPPETS = [2, 3, 4].map((c, i) => `, snippet(lamning_fts, ${c}, '«', '»', ' … ', 32) AS ${["s_besk", "s_trad", "s_terr"][i]}`).join("");
+// Träffarna markeras först med styrtecken (som inte finns i registertexten efter rensningen
+// nedan) och blir «» först när texten rensats: «» i själva registertexten byts mot ‹›.
+const SNIPPETS = [2, 3, 4].map((c, i) => `, snippet(lamning_fts, ${c}, char(1), char(2), ' … ', 32) AS ${["s_besk", "s_trad", "s_terr"][i]}`).join("");
+
+/** Extern text på en rad: styrtecken bort, radbrytningar som " / ", «» → ‹› (samma som rad() i tools/common.ts). */
+// oxlint-disable-next-line no-control-regex -- styrtecken tas bort avsiktligt
+const STYRTECKEN = /[\u0000\u0003-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+// oxlint-disable-next-line no-control-regex -- träffmarkeringarna är styrtecken
+const TRAFF_START = /\u0001/g;
+// oxlint-disable-next-line no-control-regex -- träffmarkeringarna är styrtecken
+const TRAFF_SLUT = /\u0002/g;
+// oxlint-disable-next-line no-control-regex -- träffmarkeringarna är styrtecken
+const TRAFF = /[\u0001\u0002]/g;
+
+function rensa(s: string): string {
+	return s.replace(/\r\n?|\n/g, " / ").replace(STYRTECKEN, " ").replace(/«/g, "‹").replace(/»/g, "›").replace(/\s+/g, " ").trim();
+}
 /** Geometrier läses i omgångar om så många id. */
 const GEOMETRI_OMGANG = 1000;
 const AREA_DIMS = new Set<string>(["lan", "kommun", "socken", "landskap"]);
@@ -195,10 +235,24 @@ function areaLabel(alias: string, d: string): string {
 /** SQL-ordning för lämningsnummer: år, sedan löpnummer som tal (formatet är L####:n). */
 const ORDER_LAMNINGSNUMMER = "substr(l.lamningsnummer, 1, 6), length(l.lamningsnummer), l.lamningsnummer, l.id";
 
+/**
+ * FROM och WHERE för en fråga med sökord. FTS-tabellen är yttre loop och läser
+ * sin träfflista en gång; filtren prövas som `+f.rowid IN (SELECT id …)` mot
+ * mängder som byggs en gång. Plustecknet är nödvändigt: utan det får FTS5
+ * rowid-villkoret i xBestIndex och kör MATCH en gång per id i mängden (för
+ * "och" i Uppsala län 1,7 s, med rangordning flera minuter). lamning läses
+ * inte alls här; raderna hämtas för den sida som returneras.
+ */
+function ftsFrom(conditions: FilterPart[], fts: FtsQuery): { from: string; where: SqlPart } {
+	const parts: SqlPart[] = [{ sql: "f.lamning_fts MATCH ?", params: [fts.match] }];
+	for (const c of conditions) parts.push({ sql: `+f.rowid IN ${c.idSub}`, params: c.params });
+	return { from: "FROM lamning_fts f", where: where(parts) };
+}
+
 /** Kort början av en text, avkortad vid ordgräns. */
 export function lead(text: string | null, max = UTDRAG_TECKEN): string | null {
 	if (!text) return null;
-	const t = text.replace(/\s+/g, " ").trim();
+	const t = rensa(text.replace(TRAFF, " "));
 	if (t.length <= max) return t;
 	const cut = t.slice(0, max);
 	const sp = cut.lastIndexOf(" ");
@@ -211,8 +265,8 @@ export function lead(text: string | null, max = UTDRAG_TECKEN): string | null {
  */
 function chooseUtdrag(r: Row): string | null {
 	for (const k of ["s_besk", "s_trad", "s_terr"]) {
-		const v = str(r[k])?.replace(/\s+/g, " ").trim();
-		if (v?.includes("«")) return v;
+		const v = str(r[k]);
+		if (v?.includes("\u0001")) return rensa(v).replace(TRAFF_START, "«").replace(TRAFF_SLUT, "»");
 	}
 	return lead(str(r.beskrivning));
 }
@@ -301,13 +355,49 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 			this.stmt("SELECT nyckel, varde FROM synk_status"),
 		]);
 		const kv = new Map(st.map((r) => [String(r.nyckel), str(r.varde)]));
+		// Användbart först när en grundladdning (eller avstämning) skrivit sin markör sist:
+		// en avbruten grundladdning har rader men ingen markör, och ska ge reservläge.
+		const markor = !!(kv.get("senaste_grundladdning") || kv.get("senaste_avstamning"));
 		return {
-			laddad: Number(ex[0]?.laddad) === 1,
+			laddad: Number(ex[0]?.laddad) === 1 && markor,
+			har_rader: Number(ex[0]?.laddad) === 1,
 			uttagsdatum: kv.get("uttagsdatum") ?? null,
 			senast_synkat: kv.get("senast_synkat") ?? null,
 			senaste_grundladdning: kv.get("senaste_grundladdning") ?? null,
 			senaste_avstamning: kv.get("senaste_avstamning") ?? null,
 		};
+	}
+
+	/**
+	 * Hur stor del av det semantiska omfånget (län) som är inbäddat: lämningar i
+	 * omfånget och rader i `inbaddning` (inbäddade eller utan meningsfull text).
+	 */
+	async inbaddningsLage(lan: string[]): Promise<{ i_omfang: number; inbaddade: number }> {
+		const [a, b] = await this.batch([
+			this.stmt(
+				"SELECT count(*) AS c FROM (SELECT lo.lamning_id FROM omrade o CROSS JOIN lamning_omrade lo ON lo.omrade_id = o.id WHERE o.niva = 'lan' AND o.namn IN (SELECT value FROM json_each(?)) GROUP BY lo.lamning_id)",
+				[JSON.stringify(lan)],
+			),
+			this.stmt("SELECT count(*) AS c FROM inbaddning"),
+		]);
+		return { i_omfang: num(a[0]?.c) ?? 0, inbaddade: num(b[0]?.c) ?? 0 };
+	}
+
+	/**
+	 * Socknar (med län när namnet är flertydigt) och kommuner med lämningar vars
+	 * ruta ligger inom radien från punkten. Högst `max` socknar; fler ger bara
+	 * kommunerna. För att översätta `nara` till ett filter den semantiska kanalen kan använda.
+	 */
+	async omradenInomRadie(nara: { lat: number; lon: number; radie_m: number }, max: number): Promise<{ socken: Array<{ namn: string; lan?: string[] }>; kommun: string[] }> {
+		const p = checkedPlanar(nara.lat, nara.lon);
+		const sp = spatialPart(boxAround(p, nara.radie_m));
+		const rows = await this.all({
+			sql: `SELECT DISTINCT o.niva, o.namn, o.lan FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE lo.lamning_id IN ${sp.idSub} AND o.niva IN ('socken', 'kommun')`,
+			params: sp.params,
+		});
+		const socken = rows.filter((r) => r.niva === "socken").map((r) => ({ namn: String(r.namn), ...(str(r.lan) ? { lan: [String(r.lan)] } : {}) }));
+		const kommun = rows.filter((r) => r.niva === "kommun").map((r) => String(r.namn));
+		return { socken: socken.length <= max ? socken : [], kommun };
 	}
 
 	/** Antal lämningar i indexet (för hälsokontroll: 0 betyder att indexet inte är laddat). */
@@ -378,24 +468,29 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 	 * bortom cutoff kan några saknas. Därför stryks träffar bortom cutoff, och
 	 * svaret är fullständigt inom min(radie, cutoff).
 	 *
-	 * Med sökord är lämning yttre loop (MATCH prövas per kandidat), så att ett
-	 * vanligt ord inte läser hela sin träfflista (granskningen, punkt 5).
+	 * Med sökord är FTS-tabellen yttre loop (ftsFrom) och rutan en mängd som
+	 * prövas per träff. Den tidigare ordningen, lämning yttre loop med MATCH per
+	 * kandidat, körde om hela ordfrågan för varje kandidat: "och" inom 20 km från
+	 * Visby tog flera minuter mot hela landet.
 	 */
 	private async nearCandidates(
-		conditions: SqlPart[],
+		conditions: FilterPart[],
 		fts: FtsQuery | null,
 		p: Planar,
 		radius: number | null,
 	): Promise<{ hits: Array<{ id: number; uuid: string; m: Measured; rank: number | null }>; cutoff: number | null }> {
-		const from = fts ? "FROM lamning l CROSS JOIN lamning_fts f ON f.rowid = l.id" : "FROM lamning l";
-		const w = where(conditions, fts ? [{ sql: "f.lamning_fts MATCH ?", params: [fts.match] }] : []);
-		const rows = await this.all(
-			{
-				sql: `SELECT l.id, max(l.min_e - ?, 0, ? - l.max_e) AS dx, max(l.min_n - ?, 0, ? - l.max_n) AS dy${fts ? `, ${RANK} AS rk` : ""} ${from} ${w.sql} ORDER BY dx * dx + dy * dy, l.id LIMIT ?`,
-				params: [p.e, p.e, p.n, p.n, ...w.params],
-			},
-			[this.maxKandidater + 1],
-		);
+		let sql: string;
+		let params: unknown[];
+		if (fts) {
+			const q = ftsFrom(conditions, fts);
+			sql = `SELECT l.id, max(l.min_e - ?, 0, ? - l.max_e) AS dx, max(l.min_n - ?, 0, ? - l.max_n) AS dy, ${RANK} AS rk ${q.from} CROSS JOIN lamning l ON l.id = f.rowid ${q.where.sql} ORDER BY dx * dx + dy * dy, l.id LIMIT ?`;
+			params = [p.e, p.e, p.n, p.n, ...q.where.params];
+		} else {
+			const w = where(conditions);
+			sql = `SELECT l.id, max(l.min_e - ?, 0, ? - l.max_e) AS dx, max(l.min_n - ?, 0, ? - l.max_n) AS dy FROM lamning l ${w.sql} ORDER BY dx * dx + dy * dy, l.id LIMIT ?`;
+			params = [p.e, p.e, p.n, p.n, ...w.params];
+		}
+		const rows = await this.all({ sql, params }, [this.maxKandidater + 1]);
 		let cutoff: number | null = null;
 		if (rows.length > this.maxKandidater) {
 			const r = rows[this.maxKandidater];
@@ -419,6 +514,12 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 			}
 		}
 		return { hits, cutoff };
+	}
+
+	private async uuidsFor(ids: number[]): Promise<Map<number, string>> {
+		if (!ids.length) return new Map();
+		const rows = await this.all("SELECT id, uuid FROM lamning WHERE id IN (SELECT value FROM json_each(?))", [JSON.stringify(ids)]);
+		return new Map(rows.map((r) => [Number(r.id), String(r.uuid)]));
 	}
 
 	/** Träffrader (med utdrag runt sökorden när `fts` finns) för givna id, i godtycklig ordning. */
@@ -457,16 +558,23 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 		let totalt: number;
 		let ungefar = false;
 		let pageIds: Array<{ id: number; d?: number; dir?: string | null }>;
-		if (!b.nara) {
-			// CROSS JOIN tvingar FTS-tabellen att vara yttre loop. Annars kan planeraren
-			// låta ett selektivt filter driva och utvärdera MATCH en gång per rad (FTS5-fälla).
-			const from = b.fts ? "FROM lamning_fts f CROSS JOIN lamning l ON l.id = f.rowid" : "FROM lamning l";
-			const w = where(b.conditions, b.fts ? [{ sql: "f.lamning_fts MATCH ?", params: [b.fts.match] }] : []);
-			const order = b.fts ? `ORDER BY ${RANK}, l.id` : `ORDER BY ${ORDER_LAMNINGSNUMMER}`;
-			const stmts = [this.stmt({ sql: `SELECT count(*) AS c ${from} ${w.sql}`, params: w.params })];
-			if (!beyond) stmts.push(this.stmt({ sql: `SELECT l.id ${from} ${w.sql} ${order} LIMIT ? OFFSET ?`, params: w.params }, [antal, offset]));
-			const [countRows, idRows = []] = await this.batch(stmts);
+		let rangordnad = true;
+		if (!b.nara && b.fts) {
+			const r = await this.ftsPage(b.conditions, b.fts, beyond ? 0 : antal, offset);
+			totalt = r.totalt;
+			rangordnad = r.rangordnad;
+			pageIds = r.ids.map((id) => ({ id }));
+		} else if (!b.nara) {
+			// Antal först: fler än MAX_RANKAD sorteras efter id (indexets ordning) i stället
+			// för lämningsnummer, som kräver att alla träffar läses och sorteras.
+			const w = where(b.conditions);
+			const [countRows] = await this.batch([this.stmt({ sql: `SELECT count(*) AS c FROM lamning l ${w.sql}`, params: w.params })]);
 			totalt = num(countRows[0]?.c) ?? 0;
+			rangordnad = totalt <= MAX_RANKAD;
+			const idRows =
+				beyond || offset >= totalt
+					? []
+					: await this.all({ sql: `SELECT l.id FROM lamning l ${w.sql} ORDER BY ${rangordnad ? ORDER_LAMNINGSNUMMER : "l.id"} LIMIT ? OFFSET ?`, params: w.params }, [antal, offset]);
 			pageIds = idRows.map((r) => ({ id: Number(r.id) }));
 		} else {
 			const { hits, cutoff } = await this.nearCandidates(b.conditions, b.fts, b.nara.p, b.nara.radie_m);
@@ -493,7 +601,23 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 			byggdatum,
 			sokord,
 			...(ungefar ? { totalt_ungefar: true } : {}),
+			...(rangordnad ? {} : { rangordnad: false as const }),
 		};
+	}
+
+	/**
+	 * Ordsök utan `nara`: antal först (läser bara träfflistan), sedan en sida id.
+	 * Fler träffar än MAX_RANKAD ordnas efter id i stället för bm25.
+	 */
+	private async ftsPage(conditions: FilterPart[], fts: FtsQuery, limit: number, offset: number): Promise<{ totalt: number; ids: number[]; rangordnad: boolean }> {
+		const q = ftsFrom(conditions, fts);
+		const [countRows] = await this.batch([this.stmt({ sql: `SELECT count(*) AS c ${q.from} ${q.where.sql}`, params: q.where.params })]);
+		const totalt = num(countRows[0]?.c) ?? 0;
+		const rangordnad = totalt <= MAX_RANKAD;
+		if (!limit || !totalt || offset >= totalt) return { totalt, ids: [], rangordnad };
+		const order = rangordnad ? `ORDER BY ${RANK}, f.rowid` : "ORDER BY f.rowid";
+		const rows = await this.all({ sql: `SELECT f.rowid AS id ${q.from} ${q.where.sql} ${order} LIMIT ? OFFSET ?`, params: q.where.params }, [limit, offset]);
+		return { totalt, ids: rows.map((r) => Number(r.id)), rangordnad };
 	}
 
 	/**
@@ -505,13 +629,21 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 		const lim = clampInt(limit, 100, 1, MAX_KANDIDATER);
 		const b = buildFilter(filter);
 		const sokord = b.fts ? b.fts.terms.map((t) => `${t.term}${t.prefix ? "*" : ""}`) : [];
+		if (!b.nara && b.fts) {
+			const r = await this.ftsPage(b.conditions, b.fts, lim, 0);
+			const uuids = await this.uuidsFor(r.ids);
+			return {
+				totalt: r.totalt,
+				ids: r.ids.flatMap((id) => (uuids.has(id) ? [{ uuid: uuids.get(id) as string }] : [])),
+				sokord,
+				...(r.rangordnad ? {} : { rangordnad: false as const }),
+			};
+		}
 		if (!b.nara) {
-			const from = b.fts ? "FROM lamning_fts f CROSS JOIN lamning l ON l.id = f.rowid" : "FROM lamning l";
-			const w = where(b.conditions, b.fts ? [{ sql: "f.lamning_fts MATCH ?", params: [b.fts.match] }] : []);
-			const order = b.fts ? `ORDER BY ${RANK}, l.id` : `ORDER BY ${ORDER_LAMNINGSNUMMER}`;
+			const w = where(b.conditions);
 			const [countRows, rows] = await this.batch([
-				this.stmt({ sql: `SELECT count(*) AS c ${from} ${w.sql}`, params: w.params }),
-				this.stmt({ sql: `SELECT l.uuid ${from} ${w.sql} ${order} LIMIT ?`, params: w.params }, [lim]),
+				this.stmt({ sql: `SELECT count(*) AS c FROM lamning l ${w.sql}`, params: w.params }),
+				this.stmt({ sql: `SELECT l.uuid FROM lamning l ${w.sql} ORDER BY ${ORDER_LAMNINGSNUMMER} LIMIT ?`, params: w.params }, [lim]),
 			]);
 			return { totalt: num(countRows[0]?.c) ?? 0, ids: rows.map((r) => ({ uuid: String(r.uuid) })), sokord };
 		}
@@ -592,7 +724,7 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 			lamningstyp: q.lamningstyp,
 			antikvarisk_bedomning: q.antikvarisk_bedomning as IndexSearchFilter["antikvarisk_bedomning"],
 		});
-		const { hits, cutoff } = await this.nearCandidates([...f.conditions, spatialCondition(box)], null, center, radius);
+		const { hits, cutoff } = await this.nearCandidates([...f.conditions, spatialPart(box)], null, center, radius);
 		hits.sort((a, b) => a.m.distance - b.m.distance || a.id - b.id);
 		const top = hits.slice(0, antal);
 		const ids = top.map((x) => x.id);
@@ -663,7 +795,18 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 
 	// ------------------------------------------------------------ statistik
 
-	/** Antal lämningar per grupp, en eller två nivåer, högst 200 rader. */
+	/**
+	 * Antal lämningar per grupp, en eller två nivåer, högst 200 rader.
+	 *
+	 * - En nivå utan filter: ur förberäknade tabeller (område:
+	 *   omrade_sammanfattning) eller ett index (typ, bedömning; kategori via
+	 *   antal per typ). Läser aldrig hela lamning_omrade.
+	 * - Annars: först mängden lämningar som uppfyller filtret (FTS-tabellen som
+	 *   yttre loop med sökord, närhetens kandidater med `nara`), sedan en
+	 *   gruppering över den, med områdena via indexet på lamning_omrade(lamning_id).
+	 *   Kräver grupperingen område eller två nivåer görs den bara för högst
+	 *   MAX_STATISTIK_LAMNINGAR lämningar; fler ger ett fel som ber om ett filter.
+	 */
 	async statistik(gruppera_pa: StatistikDimension[], filter: IndexSearchFilter = {}): Promise<StatistikResult> {
 		if (!Array.isArray(gruppera_pa) || gruppera_pa.length < 1 || gruppera_pa.length > 2)
 			throw new IndexInputError("gruppera_pa: ange en eller två nivåer.");
@@ -672,25 +815,8 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 		if (gruppera_pa.length === 2 && gruppera_pa[0] === gruppera_pa[1]) throw new IndexInputError("gruppera_pa: två olika nivåer.");
 		const b = buildFilter(filter);
 		const byggdatum = await this.byggdatum();
-
-		// Snabbväg: en områdesnivå utan filter räknas direkt ur lamning_omrade, utan att läsa lamning (punkt 9).
-		const d0 = gruppera_pa[0];
-		if (gruppera_pa.length === 1 && !b.conditions.length && !b.fts && !b.nara && AREA_DIMS.has(d0)) {
-			const [rows, tot] = await this.batch([
-				this.stmt(
-					`SELECT ${areaLabel("o", d0)} AS v0, count(*) AS antal FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE o.niva = ? GROUP BY o.id ORDER BY antal DESC, v0`,
-					[d0],
-				),
-				this.stmt(
-					"SELECT (SELECT count(*) FROM lamning) AS c, (SELECT count(DISTINCT lo.lamning_id) FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE o.niva = ?) AS med",
-					[d0],
-				),
-			]);
-			const totalt = num(tot[0]?.c) ?? 0;
-			const saknas = totalt - (num(tot[0]?.med) ?? 0);
-			const grupper = rows.map((r) => ({ varden: [String(r.v0)], antal: num(r.antal) ?? 0 }));
-			if (saknas > 0) grupper.push({ varden: ["(saknas)"], antal: saknas });
-			grupper.sort((a, b) => b.antal - a.antal || a.varden[0].localeCompare(b.varden[0]));
+		const result = (totalt: number, grupper: StatistikResult["grupper"], extra: Partial<StatistikResult> = {}): StatistikResult => {
+			grupper.sort((x, y) => y.antal - x.antal || x.varden.join("\u0001").localeCompare(y.varden.join("\u0001")));
 			return {
 				gruppera_pa,
 				totalt,
@@ -698,12 +824,87 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 				avkortad: grupper.length > MAX_STATISTIK_RADER,
 				kalla: KALLA_INDEX,
 				byggdatum,
+				...extra,
 			};
+		};
+
+		const d0 = gruppera_pa[0];
+		if (gruppera_pa.length === 1 && !b.conditions.length && !b.fts && !b.nara) {
+			if (AREA_DIMS.has(d0)) {
+				// Antal per område ur omrade_sammanfattning; "(saknas)" = lämningar utan område på nivån.
+				const [rows, tot] = await this.batch([
+					this.stmt(
+						`SELECT ${areaLabel("o", d0)} AS v0, s.antal FROM omrade o JOIN omrade_sammanfattning s ON s.omrade_id = o.id WHERE o.niva = ? AND s.antal > 0`,
+						[d0],
+					),
+					this.stmt("SELECT (SELECT count(*) FROM lamning) AS c, (SELECT med_omrade FROM niva_sammanfattning WHERE niva = ?) AS med", [d0]),
+				]);
+				const totalt = num(tot[0]?.c) ?? 0;
+				const grupper = rows.map((r) => ({ varden: [String(r.v0)], antal: num(r.antal) ?? 0 }));
+				let med = num(tot[0]?.med);
+				if (med === null) {
+					// niva_sammanfattning saknar nivån (t.ex. efter en ofullständig migrering): räkna här.
+					const r = await this.all(
+						"SELECT count(*) AS c FROM (SELECT lamning_id FROM lamning_omrade INDEXED BY idx_lamning_omrade_lamning WHERE omrade_id IN (SELECT id FROM omrade WHERE niva = ?) GROUP BY lamning_id)",
+						[d0],
+					);
+					med = num(r[0]?.c) ?? 0;
+				}
+				const saknas = totalt - med;
+				if (saknas > 0) grupper.push({ varden: ["(saknas)"], antal: saknas });
+				return result(totalt, grupper);
+			}
+			// Typ och bedömning: gruppering över sitt index. Kategori: antal per typ, sedan kategorierna.
+			const col = d0 === "bedomning" ? "bedomning" : "lamningstyp";
+			const [rows, tot] = await this.batch([
+				this.stmt(`SELECT ${col} AS v, count(*) AS antal FROM lamning GROUP BY ${col}`),
+				this.stmt("SELECT count(*) AS c FROM lamning"),
+			]);
+			let grupper = rows.map((r) => ({ varden: [str(r.v) ?? "(saknas)"], antal: num(r.antal) ?? 0 }));
+			if (d0 === "kategori") {
+				const kat = await this.all("SELECT lamningstyp, kategori FROM lamningstyp_kategori");
+				const perTyp = new Map<string, string[]>();
+				for (const k of kat) perTyp.set(String(k.lamningstyp), [...(perTyp.get(String(k.lamningstyp)) ?? []), String(k.kategori)]);
+				const sum = new Map<string, number>();
+				for (const g of grupper) for (const k of perTyp.get(g.varden[0]) ?? ["(saknas)"]) sum.set(k, (sum.get(k) ?? 0) + g.antal);
+				grupper = [...sum].map(([k, antal]) => ({ varden: [k], antal }));
+			}
+			return result(num(tot[0]?.c) ?? 0, grupper);
 		}
 
-		const extra: SqlPart[] = b.fts ? [{ sql: "l.id IN (SELECT rowid FROM lamning_fts WHERE lamning_fts MATCH ?)", params: [b.fts.match] }] : [];
-		const joins: SqlPart[] = [];
+		// Mängden lämningar som uppfyller filtret.
+		let mangd: SqlPart;
+		let totalt: number;
+		let ungefar = false;
+		if (b.nara) {
+			const { hits, cutoff } = await this.nearCandidates(b.conditions, b.fts, b.nara.p, b.nara.radie_m);
+			ungefar = cutoff !== null;
+			totalt = hits.length;
+			mangd = { sql: "SELECT value AS id FROM json_each(?)", params: [JSON.stringify(hits.map((h) => h.id))] };
+		} else {
+			if (b.fts) {
+				const q = ftsFrom(b.conditions, b.fts);
+				mangd = { sql: `SELECT f.rowid AS id ${q.from} ${q.where.sql}`, params: q.where.params };
+			} else {
+				const w = where(b.conditions);
+				mangd = { sql: `SELECT l.id FROM lamning l ${w.sql}`, params: w.params };
+			}
+			const [c] = await this.batch([this.stmt({ sql: `SELECT count(*) AS c FROM (${mangd.sql})`, params: mangd.params })]);
+			totalt = num(c[0]?.c) ?? 0;
+		}
+		const grans = gruppera_pa.length === 2 ? MAX_STATISTIK_LAMNINGAR : AREA_DIMS.has(d0) || d0 === "kategori" ? MAX_STATISTIK_LAMNINGAR_EN_NIVA : Number.POSITIVE_INFINITY;
+		if (totalt > grans) {
+			throw new IndexInputError(
+				`Statistiken omfattar ${totalt} lämningar; gruppering på ${gruppera_pa.join(" och ")} görs för högst ${grans} åt gången (frågan blir annars för tung för databasen). ` +
+					"Avgränsa med län, kommun, landskap, typ eller bedömning, eller gruppera på en nivå utan filter (det går för hela landet).",
+			);
+		}
+
+		const joins: string[] = [];
+		const params: unknown[] = [];
 		const values: string[] = [];
+		const behoverRad = gruppera_pa.some((d) => !AREA_DIMS.has(d));
+		if (behoverRad) joins.push("JOIN lamning l ON l.id = m.id");
 		gruppera_pa.forEach((d, i) => {
 			const a = `g${i}`;
 			switch (d) {
@@ -714,44 +915,31 @@ export class IndexStore implements SearchSource, IdResolver, RecordSource, Nearb
 					values.push("coalesce(l.bedomning, '(saknas)')");
 					break;
 				case "kategori":
-					joins.push({ sql: `LEFT JOIN lamningstyp_kategori ${a} ON ${a}.lamningstyp = l.lamningstyp`, params: [] });
+					joins.push(`LEFT JOIN lamningstyp_kategori ${a} ON ${a}.lamningstyp = l.lamningstyp`);
 					values.push(`coalesce(${a}.kategori, '(saknas)')`);
 					break;
 				default:
-					joins.push({
-						sql: `LEFT JOIN (SELECT lo.lamning_id, o.namn, o.lan FROM lamning_omrade lo JOIN omrade o ON o.id = lo.omrade_id WHERE o.niva = ?) ${a} ON ${a}.lamning_id = l.id`,
-						params: [d],
-					});
+					joins.push(
+						// Plustecknet: annars slår planeraren upp varje område på nivån (2 442 socknar) per lämning.
+						`LEFT JOIN lamning_omrade lo${i} ON lo${i}.lamning_id = m.id AND +lo${i}.omrade_id IN (SELECT id FROM omrade WHERE niva = ?) LEFT JOIN omrade ${a} ON ${a}.id = lo${i}.omrade_id`,
+					);
+					params.push(d);
 					values.push(`coalesce(${areaLabel(a, d)}, '(saknas)')`);
 			}
 		});
-		let w = where(b.conditions, extra);
-		let ungefar = false;
-		if (b.nara) {
-			// Exakt avstånd till geometrin, som i sökningen.
-			const { hits, cutoff } = await this.nearCandidates(b.conditions, b.fts, b.nara.p, b.nara.radie_m);
-			ungefar = cutoff !== null;
-			w = { sql: "WHERE l.id IN (SELECT value FROM json_each(?))", params: [JSON.stringify(hits.map((h) => h.id))] };
-		}
 		const cols = values.map((v, i) => `${v} AS v${i}`).join(", ");
 		const groupBy = values.map((_, i) => `v${i}`).join(", ");
-		const sql = `SELECT ${cols}, count(*) AS antal FROM lamning l ${joins.map((j) => j.sql).join(" ")} ${w.sql} GROUP BY ${groupBy} ORDER BY antal DESC, ${groupBy} LIMIT ?`;
-		const [rows, countRows] = await this.batch([
-			this.stmt({ sql, params: [...joins.flatMap((j) => j.params), ...w.params] }, [MAX_STATISTIK_RADER + 1]),
-			this.stmt({ sql: `SELECT count(*) AS c FROM lamning l ${w.sql}`, params: w.params }),
-		]);
-		return {
-			gruppera_pa,
-			totalt: num(countRows[0]?.c) ?? 0,
-			grupper: rows.slice(0, MAX_STATISTIK_RADER).map((r) => ({
-				varden: gruppera_pa.map((_, i) => String(r[`v${i}`] ?? "(saknas)")),
-				antal: num(r.antal) ?? 0,
-			})),
-			avkortad: rows.length > MAX_STATISTIK_RADER,
-			kalla: KALLA_INDEX,
-			byggdatum,
-			...(ungefar ? { totalt_ungefar: true } : {}),
-		};
+		const rows = await this.all(
+			{
+				sql: `WITH m(id) AS MATERIALIZED (${mangd.sql}) SELECT ${cols}, count(*) AS antal FROM m ${joins.join(" ")} GROUP BY ${groupBy} ORDER BY antal DESC, ${groupBy} LIMIT ?`,
+				params: [...mangd.params, ...params],
+			},
+			[MAX_STATISTIK_RADER + 1],
+		);
+		const grupper = rows.map((r) => ({ varden: gruppera_pa.map((_, i) => String(r[`v${i}`] ?? "(saknas)")), antal: num(r.antal) ?? 0 }));
+		const res = result(totalt, grupper, ungefar ? { totalt_ungefar: true } : {});
+		res.avkortad = rows.length > MAX_STATISTIK_RADER;
+		return res;
 	}
 
 	// ------------------------------------------------------------ uppslag

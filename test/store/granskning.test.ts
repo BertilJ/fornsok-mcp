@@ -139,7 +139,7 @@ describe.skipIf(!HAS_FALUN)(`Granskningens fynd mot Falu kommun ${HAS_FALUN ? ""
 		expect(queries.length).toBeGreaterThan(0);
 		for (const q of queries) expect(q.params.length).toBeLessThanOrEqual(60);
 		// Egenskaperna tar två parametrar oavsett antal typer.
-		const eq = queries.find((q) => q.sql.includes("FROM json_each(?) j\n\t\t\t\t\tJOIN egenskap"));
+		const eq = queries.find((q) => q.sql.includes("FROM json_each(?) j\n\t\t\t\t\tCROSS JOIN egenskap"));
 		expect(eq).toBeTruthy();
 		// Semantiken är kvar: samma typ ELLER, olika typer OCH.
 		const mid = await store.searchIndex({ egenskap: [{ typ: "Typ", varde: "Midsommar/trefaldighet" }] }, { antal: 100 });
@@ -170,18 +170,26 @@ describe.skipIf(!HAS_FALUN)(`Granskningens fynd mot Falu kommun ${HAS_FALUN ? ""
 
 	// ---------------------------------------------------------------- 5
 
-	it("punkt 5: sökord + nara – lämning är yttre loop, inte FTS-tabellen", async () => {
+	it("punkt 5 (omprövad mot hela landet): sökord + nara – FTS yttre loop, rutan som mängd, ingen MATCH per rad", async () => {
+		// Lämning som yttre loop med MATCH per kandidat körde om hela ordfrågan för varje
+		// kandidat ("och" inom 20 km från Visby: flera minuter mot hela landet). Nu läses
+		// träfflistan en gång och rutan prövas som en mängd (+f.rowid, så att FTS5 inte
+		// får rowid-villkoret).
 		queries.length = 0;
 		const r = await store.searchIndex({ fraga: "och", nara: { ...FALU_GRUVA, radie_m: 3000 } }, { antal: 10 });
 		expect(r.totalt).toBeGreaterThan(0);
 		const cand = queries.find((q) => /ORDER BY dx \* dx \+ dy \* dy/.test(q.sql));
-		expect(cand?.sql).toContain("FROM lamning l CROSS JOIN lamning_fts f ON f.rowid = l.id");
+		expect(cand?.sql).toContain("FROM lamning_fts f CROSS JOIN lamning l ON l.id = f.rowid");
+		expect(cand?.sql).toContain("+f.rowid IN (SELECT id FROM lamning WHERE rumsklass = 0");
 		const plan = (db.prepare(`EXPLAIN QUERY PLAN ${cand!.sql}`).all(...(cand!.params as SQLInputValue[])) as Array<{ detail: string }>).map((x) => x.detail);
-		expect(plan[0]).toMatch(/^SEARCH l /);
-		expect(plan.join(" | ")).not.toMatch(/^SCAN f/);
+		expect(plan[0]).toMatch(/^SCAN f VIRTUAL TABLE INDEX 0:M/);
 		// Rangordningen gäller fortfarande: samma som utan radie, begränsat till radien.
 		for (const h of r.traffar) expect(h.avstand_m).toBeLessThanOrEqual(3000);
 		expect(r.traffar.some((h) => h.utdrag?.includes("«och»"))).toBe(true);
+		const utan = await store.searchIndex({ fraga: "och" }, { antal: 100 });
+		const inom = new Set(r.traffar.map((h) => h.uuid));
+		expect(utan.totalt).toBeGreaterThanOrEqual(r.totalt);
+		expect(inom.size).toBe(r.traffar.length);
 	});
 
 	// ---------------------------------------------------------------- 6

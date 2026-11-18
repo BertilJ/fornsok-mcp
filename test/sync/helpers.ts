@@ -1,5 +1,5 @@
 /**
- * Gemensamt för synktesterna: tom databas med migreringarna 0001 och 0002 i
+ * Gemensamt för synktesterna: tom databas med migreringarna 0001–0003 i
  * node:sqlite (via adaptern i test/store), och en falsk fetch som svarar från
  * inspelade svar.
  */
@@ -30,6 +30,7 @@ export function emptyDb(): DatabaseSync {
 	db.exec("PRAGMA foreign_keys = ON");
 	db.exec(readFileSync(join(MIGRATIONS, "0001_init.sql"), "utf8"));
 	db.exec(readFileSync(join(MIGRATIONS, "0002_synk_semantik.sql"), "utf8"));
+	db.exec(readFileSync(join(MIGRATIONS, "0003_omraden.sql"), "utf8"));
 	return db;
 }
 

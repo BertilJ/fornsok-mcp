@@ -1,12 +1,13 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { strikt } from "./schema";
 import { publicUrl } from "../config";
 import { ToolInputError } from "../errors";
 import { bboxAround, compassDirection, type Geometry, nearestPoint, wgsToSweref } from "../geo/geometry";
 import { isInSweden, type Planar, round, toLatLon, toPlanar } from "../geo/sweref";
 import { BEDOMNINGAR, type NearbyFeature, type NearbyPage } from "../sources/types";
 import { reservHamtadFran } from "../store/access";
-import { READ_ONLY, type ToolDeps, ok, runTool } from "./common";
+import { READ_ONLY, type ToolDeps, ok, runTool, citat, EXTERN_TEXT } from "./common";
 import { type OpenIndex, viaIndex } from "./via_index";
 
 /** Högst så många geometrier hämtas per anrop till OGC API. */
@@ -14,7 +15,7 @@ export const NEARBY_FETCH_LIMIT = 1000;
 const MAX_SHRINK_STEPS = 3;
 const MAX_BBOX_SIDE_M = 20_000;
 
-export const naraInput = z.object({
+export const naraInput = strikt("lamningar_nara", {
 	lat: z.number().min(-90).max(90).optional().describe("Latitud i WGS 84 (decimalgrader)."),
 	lon: z.number().min(-180).max(180).optional().describe("Longitud i WGS 84 (decimalgrader)."),
 	radie_m: z.number().positive().max(10_000).default(500).describe("Sökradie i meter (högst 10 000)."),
@@ -120,7 +121,7 @@ export function registerLamningarNara(server: McpServer, deps: ToolDeps): void {
 				"Lämningar närmast en punkt (lat/lon i WGS 84) inom en radie, eller inom en ruta. Räknas mot serverns eget index; om det inte är tillgängligt mot RAÄ:s OGC API Features (svaret märks som reservläge). " +
 				"Avståndet räknas i SWEREF 99 TM till närmaste punkt på lämningens geometri (punkt, linje eller yta; 0 m = punkten ligger inom ytan). " +
 				"Sorterat närmast först, med väderstreck från punkten. Filter på lämningstyp och antikvarisk bedömning. " +
-				"En koordinat från t.ex. ortnamnsuppslag (TORA i Riksarkivets koppling) kan skickas direkt hit.",
+				"En koordinat från t.ex. ortnamnsuppslag (TORA i Riksarkivets koppling) kan skickas direkt hit." + EXTERN_TEXT,
 			inputSchema: naraInput,
 			outputSchema: naraOutput,
 			annotations: { ...READ_ONLY, title: "Lämningar nära en plats" },
@@ -356,7 +357,7 @@ function respondNara(q: NaraQuery, s: NaraSvar) {
 					? "0 m (punkten ligger på lämningen)"
 					: `${it.avstand_m} m ${it.vaderstreck}`;
 			const nr = [it.lamningsnummer, it.raa_nummer ? `(${it.raa_nummer})` : null].filter(Boolean).join(" ");
-			const namn = it.namn ? ` "${it.namn}"` : "";
+			const namn = it.namn ? ` ${citat(it.namn)}` : "";
 			const osak = it.osakerhet_m ? `, lägesosäkerhet ${it.osakerhet_m} m` : "";
 			lines.push(
 				`${i + 1}. ${nr}${namn} – ${it.lamningstyp ?? "okänd typ"}, ${it.antikvarisk_bedomning ?? "bedömning saknas"}. ${lage}${osak}. ${it.url ?? ""}`.trim(),

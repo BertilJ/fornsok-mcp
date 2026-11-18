@@ -10,6 +10,7 @@ import { avstamning, GpkgReader, newStats, type ReadStats } from "./read.ts";
 import type { Referens } from "./referens.ts";
 import { FileSink } from "./sink.ts";
 import { batchStatements, deleteLamningar, kategoriStatements, type SqlSink, synkStatements } from "./sql.ts";
+import { fullRecomputeSql } from "../src/store/omraden.ts";
 import { contentHash, type IndexPost, Indelning, toIndexPost } from "./transform.ts";
 
 export const DEFAULT_REFERENS = join(dirname(fileURLToPath(import.meta.url)), "data", "referens.json");
@@ -34,6 +35,8 @@ function header(sink: SqlSink, ref: Referens | null) {
 
 function footer(sink: SqlSink, info: Parameters<typeof synkStatements>[0]) {
 	if (sink instanceof FileSink) sink.open("synk");
+	// Områdenas sammanfattning (migrations/0003_omraden.sql) räknas om helt, i delar.
+	for (const s of fullRecomputeSql()) sink.emit(s);
 	for (const s of synkStatements(info)) sink.emit(s);
 }
 

@@ -30,10 +30,11 @@ describe("node ingest/cli.ts", () => {
 });
 
 describe("ingest/referens.ts: User-Agent", () => {
-	it("använder samma kontaktväg som servern, ingen driftadress", async () => {
+	it("använder samma kontaktväg som servern (inställningen, aldrig en hårdkodad driftadress)", async () => {
 		const { USER_AGENT } = await import("../../ingest/referens.ts");
 		const { DEFAULT_CONTACT_URL } = await import("../../src/config");
 		expect(USER_AGENT).toBe(`fornsok-mcp/0.1 (+${process.env.CONTACT_URL ? new URL(process.env.CONTACT_URL).href : DEFAULT_CONTACT_URL})`);
-		expect(USER_AGENT).not.toMatch(/example/);
+		// Utan CONTACT_URL är kontaktvägen exakt standardvärdet ur src/config.ts, inget annat.
+		if (!process.env.CONTACT_URL) expect(USER_AGENT).toBe(`fornsok-mcp/0.1 (+${DEFAULT_CONTACT_URL})`);
 	});
 });

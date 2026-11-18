@@ -6,6 +6,7 @@
  * `egenskap`.
  */
 import { z } from "zod";
+import { strikt } from "./schema";
 import { ToolInputError } from "../errors";
 import { bboxAround } from "../geo/geometry";
 import { isInSweden } from "../geo/sweref";
@@ -48,15 +49,14 @@ export const filterShape = {
 	landskap: namnLista('Landskap, t.ex. "Dalarna".'),
 	lan: namnLista('Län, t.ex. "Dalarna" eller "Dalarnas län".'),
 	egenskap: z
-		.array(z.object({ typ: z.string().min(1).max(100), varde: z.string().min(1).max(200) }))
+		.array(strikt("egenskap", { typ: z.string().min(1).max(100), varde: z.string().min(1).max(200) }))
 		.min(1)
 		.max(20)
 		.optional()
 		.describe(
 			'Egenskaper, t.ex. {typ: "Material", varde: "Koppar"} eller {typ: "Verksamhet", varde: "Bergsbruk"}. Samma typ: något av värdena; olika typer: alla måste gälla. Gäller även ingående lämningar. Se uppslag lista=egenskapstyper. Kräver indexet.',
 		),
-	nara: z
-		.object({
+	nara: strikt("nara", {
 			lat: z.number().min(-90).max(90),
 			lon: z.number().min(-180).max(180),
 			radie_m: z.number().positive().max(MAX_NARA_RADIE_M).default(1000),

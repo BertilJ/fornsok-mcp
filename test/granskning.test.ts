@@ -445,3 +445,10 @@ describe("MCP: kategori i sok_lamningar", () => {
 		expect(ksQueries(c.calls)).toHaveLength(2);
 	});
 });
+
+describe("svarskroppens gräns (granskningen av verktygsskiktet, punkt 7)", () => {
+	it("standardgränsen är 8 MB", async () => {
+		const { MAX_BODY_BYTES } = await import("../src/upstream/client");
+		expect(MAX_BODY_BYTES).toBe(8 * 1024 * 1024);
+	});
+});

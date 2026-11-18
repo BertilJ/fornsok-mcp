@@ -77,6 +77,7 @@ export function createSemanticSearch(env: SemanticEnv): SemanticSearch | null {
 		console.warn(`semantik: okända län i SEMANTIC_LAN ignoreras: ${scope.okanda.join(", ")}`);
 	return {
 		omfang: scopeText(scope),
+		lan: scope.lan,
 		scopeCovers: (filter) => covers(filter, scope),
 		search: (fraga, filter, topK) => semanticSearch(env, fraga, filter, topK),
 	};
