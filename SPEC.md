@@ -391,7 +391,8 @@ Servern är användbar efter etapp 1b. Etapp 1 och 2 kan byggas och testas utan 
 | Vem skriver kod | Bara Opus och Sonnet. Fable samordnar, granskar och skriver spec | Bestämt av dig |
 | Versionshantering | Git, en commit per etapp | Bestämt av dig |
 | Publicering | Publikt på GitHub, utan nycklar eller kontospecifika uppgifter | Bestämt av dig |
-| Licens | Ingen än. MIT är mitt förslag | Öppet |
+| Licens | MIT | Bestämt av dig |
+| Driftadress | Står inte i förvaret; exemplen använder `fornsok.example.se` | Bestämt av dig |
 | RAÄ | Bygg först, informera fornsok@raa.se efter etapp 2 | Mitt förslag, inte bekräftat av dig |
 | Ortnamn | Indexets egna namn först, Nominatim i andra hand, TORA via Riksarkivets koppling för äldre platser | Mitt förslag, inte bekräftat av dig |
 | Grundladdning | Från din dator med `wrangler login`, ingen API-token | Mitt förslag, inte bekräftat av dig |
@@ -412,7 +413,8 @@ Servern är användbar efter etapp 1b. Etapp 1 och 2 kan byggas och testas utan 
   - Driftadress och kontaktväg i `User-Agent` är inställningar, inte hårdkodade, så att andra kan driftsätta med egna värden.
   - Före varje push kontrolleras att token inte finns i någon spårad fil eller i historiken, och att mönster för nycklar, id:n och adresser saknas.
   - Commits görs med GitHubs noreply-adress.
-  - Ingen licens är vald än; utan licens gäller full upphovsrätt.
+  - Licens: MIT (filen `LICENSE`). Registerdata från RAÄ är CC0 och omfattas inte av licensen.
+  - Den riktiga driftadressen står inte i någon spårad fil; exemplen använder `fornsok.example.se`.
   - Inspelade testsvar från RAÄ innehåller bara öppna registerdata (CC0).
 - Tester mot RAÄ:s tjänster görs sparsamt: inspelade svar i första hand, levande anrop bara för inspelning och kontraktstest.
 
