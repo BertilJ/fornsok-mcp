@@ -1,6 +1,7 @@
 import { createMcpHandler } from "agents/mcp/server";
 import { verifyAccessRequest } from "./auth/access";
 import { checkRateLimit } from "./auth/ratelimit";
+import { medBakgrund } from "./bakgrund";
 import { createDeps } from "./deps";
 import { type WorkerEnv, accessConfig } from "./env";
 import { runScheduled } from "./scheduled";
@@ -51,7 +52,8 @@ export default {
 		if (url.pathname !== MCP_ROUTE) {
 			return new Response("Not found", { status: 404 });
 		}
-		return getShared(env).handler(request, env, ctx);
+		// Bakgrundsarbete (t.ex. förnyelse av värdelistorna) anmäls till ctx.waitUntil (src/bakgrund.ts).
+		return medBakgrund(ctx, () => getShared(env).handler(request, env, ctx));
 	},
 
 	/**

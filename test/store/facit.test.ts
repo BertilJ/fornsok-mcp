@@ -9,7 +9,16 @@
 import type { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { nearestPoint, wgsToSweref, type Geometry } from "../../src/geo/geometry";
-import { buildFtsQuery, IndexStore, type IndexSearchFilter, type StatistikDimension } from "../../src/store/index";
+import type { D1Like, D1LikeStatement } from "../../src/store/d1";
+import {
+	buildFtsQuery,
+	IndexStore,
+	MAX_STATISTIK_LAMNINGAR,
+	MAX_STATISTIK_LAMNINGAR_EN_NIVA,
+	MAX_STATISTIK_LAMNINGAR_TVA_NIVAER_OMRADE,
+	type IndexSearchFilter,
+	type StatistikDimension,
+} from "../../src/store/index";
 import { checkedPlanar } from "../../src/store/spatial";
 import { d1FromSqlite } from "./d1-adapter";
 import { loadUrval } from "./urval-fixture";
@@ -73,7 +82,16 @@ function naiv(f: IndexSearchFilter): { ids: number[]; dist: Map<number, number> 
 		if (f.lan && !har(l, "lan", f.lan)) return false;
 		if (f.kommun && !har(l, "kommun", f.kommun)) return false;
 		if (f.landskap && !har(l, "landskap", f.landskap)) return false;
-		if (f.socken && !f.socken.some((s) => l.omr.some((o) => o.niva === "socken" && o.namn === s.namn && (!s.lan?.length || o.lan === "" || s.lan.includes(o.lan))))) return false;
+		// Med kommun i sockenfiltret: bara socknens lämningar i de kommunerna (lämningar utan kommun utesluts, se store/filter.ts).
+		if (
+			f.socken &&
+			!f.socken.some(
+				(s) =>
+					l.omr.some((o) => o.niva === "socken" && o.namn === s.namn && (!s.lan?.length || o.lan === "" || s.lan.includes(o.lan))) &&
+					(!s.kommun?.length || l.omr.some((o) => o.niva === "kommun" && s.kommun!.includes(o.namn))),
+			)
+		)
+			return false;
 		if (f.nummer && !f.nummer.some((n) => n === l.lamningsnummer || n.toLowerCase() === l.raa_sok)) return false;
 		if (f.egenskap) {
 			const typer = new Set(f.egenskap.map((e) => e.typ));
@@ -90,6 +108,18 @@ function naiv(f: IndexSearchFilter): { ids: number[]; dist: Map<number, number> 
 	else if (f.nara) ut.sort((a, b) => (dist.get(a.id) ?? 0) - (dist.get(b.id) ?? 0) || a.id - b.id);
 	else ut.sort(nummerOrdning);
 	return { ids: ut.map((l) => l.id), dist };
+}
+
+/** D1-yta där statistikens räkning av mängden (SELECT count(*) AS c FROM (…)) ger `antal`; allt annat går till databasen. */
+function raknatAntal(db: D1Like, antal: number): D1Like {
+	const falsk = (): D1LikeStatement => {
+		const st: D1LikeStatement = { bind: () => st, all: async <T>() => ({ results: [{ c: antal } as unknown as T] }) };
+		return st;
+	};
+	return {
+		prepare: (sql: string) => (sql.startsWith("SELECT count(*) AS c FROM (") ? falsk() : db.prepare(sql)),
+		batch: async <T>(stmts: D1LikeStatement[]) => Promise.all(stmts.map((s) => s.all<T>())),
+	};
 }
 
 const HYTTAN = { lat: 60.66159242831314, lon: 15.554018818384327 };
@@ -118,6 +148,10 @@ const FALL: Array<[string, IndexSearchFilter]> = [
 	["nara och typ", { nara: { ...HYTTAN, radie_m: 5000 }, kategori: ["Metallframställning och bergsbruk"] }],
 	["nara och ord", { nara: { ...HYTTAN, radie_m: 5000 }, ord: ["och"] }],
 	["inget träffar", { ord: ["och"], lamningstyp: ["Fäbod"], socken: [{ namn: "Ål" }] }],
+	// Kommunavgränsad socken (som för socknar med samma namn i samma län).
+	["socken med kommun", { socken: [{ namn: "Stora Kopparberg", lan: ["Dalarna"], kommun: ["Falun"] }] }],
+	["socken med fel kommun", { socken: [{ namn: "Bjursås", kommun: ["Leksand"] }] }],
+	["socken med kommun och ord", { ord: ["och"], socken: [{ namn: "Bjursås", kommun: ["Falun"] }] }],
 ];
 
 describe("indexfrågorna mot ett naivt facit (testurvalet, alltid)", () => {
@@ -153,6 +187,44 @@ describe("indexfrågorna mot ett naivt facit (testurvalet, alltid)", () => {
 		const r = await store.searchRanked(f, 40);
 		expect(r.totalt).toBe(facit.ids.length);
 		expect(r.ids.map((x) => x.uuid)).toEqual(facit.ids.slice(0, 40).map((id) => alla.find((l) => l.id === id)!.uuid));
+	});
+
+	// ⟦⟧-markeringen i utdragen: bara sökordens träffar, aldrig ⟦⟧ ur källtexten, balanserade.
+	const ORDFALL = FALL.filter(([, f]) => f.ord?.length);
+	it.each(ORDFALL)("utdrag: %s – träffarna inom ⟦⟧ är sökorden", async (_namn, f) => {
+		const r = await store.searchIndex(f, { antal: 50, sida: 1 });
+		const ord = (f.ord ?? []).map((o) => o.toLocaleLowerCase("sv"));
+		const matchar = (t: string) =>
+			t
+				.toLocaleLowerCase("sv")
+				.split(/\s+/)
+				.every((w) => ord.some((o) => (o.endsWith("*") ? w.startsWith(o.slice(0, -1)) : w === o)));
+		let markerade = 0;
+		for (const t of r.traffar) {
+			const u = t.utdrag ?? "";
+			expect((u.match(/⟦/g) ?? []).length, u).toBe((u.match(/⟧/g) ?? []).length);
+			for (const m of u.matchAll(/⟦([^⟦⟧]*)⟧/g)) {
+				markerade++;
+				expect(matchar(m[1]), `${m[1]} i ${u}`).toBe(true);
+			}
+			expect(u).not.toMatch(/⟦[^⟧]*⟦/);
+		}
+		if (r.traffar.length) expect(markerade).toBeGreaterThan(0);
+	});
+
+	it("statistik med de verkliga gränserna: 400 000 för två nivåer, 200 000 med områdesfilter, 1 500 000 för en nivå på område", async () => {
+		expect([MAX_STATISTIK_LAMNINGAR, MAX_STATISTIK_LAMNINGAR_TVA_NIVAER_OMRADE, MAX_STATISTIK_LAMNINGAR_EN_NIVA]).toEqual([400_000, 200_000, 1_500_000]);
+		// Antalet lämningar som filtret ger byts mot ett påhittat, så att gränserna prövas utan ett helt land.
+		const med = (antal: number) => new IndexStore(raknatAntal(d1FromSqlite(raw), antal));
+		const forn = { antikvarisk_bedomning: ["Fornlämning" as const] };
+		await expect(med(400_000).statistik(["socken", "typ"], forn)).resolves.toMatchObject({ totalt: 400_000 });
+		await expect(med(400_001).statistik(["socken", "typ"], forn)).rejects.toThrow(/400001 lämningar; gruppering på två nivåer \(socken och typ\) görs för högst 400000 lämningar \(/);
+		await expect(med(200_000).statistik(["socken", "typ"], { kommun: ["Falun"] })).resolves.toMatchObject({ totalt: 200_000 });
+		await expect(med(200_001).statistik(["socken", "typ"], { kommun: ["Falun"] })).rejects.toThrow(/högst 200000 lämningar med filter på område eller egenskap/);
+		await expect(med(1_500_000).statistik(["kommun"], forn)).resolves.toMatchObject({ totalt: 1_500_000 });
+		await expect(med(1_500_001).statistik(["kommun"], forn)).rejects.toThrow(/gruppering på kommun görs för högst 1500000 åt gången/);
+		// En nivå på typ eller bedömning har ingen gräns.
+		await expect(med(5_000_000).statistik(["typ"], forn)).resolves.toMatchObject({ totalt: 5_000_000 });
 	});
 
 	const NIVAER: StatistikDimension[][] = [["typ"], ["kategori"], ["bedomning"], ["socken"], ["kommun"], ["lan"], ["landskap"], ["socken", "typ"], ["kategori", "kommun"], ["bedomning", "socken"]];

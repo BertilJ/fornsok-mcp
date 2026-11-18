@@ -119,7 +119,12 @@ export function buildFilter(f: IndexSearchFilter): BuiltFilter {
 			// En socken utan län matchar alla socknar med namnet; med län bara socknar i de
 			// länen. Socknar med unikt namn har tomt län i indexet och matchar alltid.
 			// Med kommun (flera socknar med namnet i samma län, som indexet slagit ihop):
-			// bara socknens lämningar i de kommunerna.
+			// bara socknens lämningar i de kommunerna. Avsiktligt: lämningar som har
+			// socknen men ingen kommun i registret (30 lämningar i 13 socknar i hela
+			// landet 2026-11, t.ex. i Arjeplog, Eda, Nössemark) kommer då inte med –
+			// de går inte att föra till rätt socken bland dem med samma namn. Svaret
+			// säger det (anmärkningen från namnuppslaget, lookup/domains.ts), och
+			// test/store/vardelista.test.ts prövar det.
 			// CROSS JOIN håller ordningen namn → omrade → lamning_omrade. Utan den valde
 			// planeraren att läsa alla socknars rader i lamning_omrade (780 000 i hela
 			// landet, 350 ms) och pröva namnet efteråt.

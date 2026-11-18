@@ -19,11 +19,11 @@ describe("strikta indataschemor", () => {
 		);
 	});
 
-	it("alla åtta verktyg avvisar okända nycklar över MCP, och JSON-schemat säger additionalProperties: false", async () => {
+	it("alla nio verktyg avvisar okända nycklar över MCP, och JSON-schemat säger additionalProperties: false", async () => {
 		const c = await connectMcp();
 		try {
 			const { tools } = await c.client.listTools();
-			expect(tools).toHaveLength(8);
+			expect(tools).toHaveLength(9);
 			for (const t of tools) expect((t.inputSchema as { additionalProperties?: unknown }).additionalProperties, t.name).toBe(false);
 			const fall: Array<[string, Record<string, unknown>, RegExp]> = [
 				["lamningar_nara", { lat: 60.6, lon: 15.6, radie: 9000 }, /Okänd parameter "radie" \(menade du "radie_m"\?\) i lamningar_nara/],
@@ -33,6 +33,7 @@ describe("strikta indataschemor", () => {
 				["lamning", { id: ["L2001:646"], inkludera_allt: true }, /"inkludera_allt" \(menade du "inkludera"\?\)/],
 				["lamning_dokument", { id: "L2001:646", sida: 2 }, /Okänd parameter "sida"/],
 				["hamta_dokument", { dokument_ref: "x", storlek: 1 }, /Okänd parameter "storlek"/],
+				["relaterat", { id: "L2001:646", typ: ["foto"] }, /Okänd parameter "typ"/],
 				["statistik", { gruppera_pa: ["typ"], grupper: ["kommun"] }, /Okänd parameter "grupper"/],
 				["uppslag", { lista: "kommuner", soek: "Fal" }, /"soek" \(menade du "sok"\?\)/],
 				["hitta_plats", { namn: "Bjursås", lan_namn: "Dalarna" }, /"lan_namn" \(menade du "lan"\?\)/],

@@ -5,7 +5,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MODELL } from "../../src/semantic/bindings";
-import { AI_BATCH, embedStatus, runEmbedBatch } from "../../src/semantic/embed";
+import { AI_BATCH, arTillfalligtAiFel, embedStatus, runEmbedBatch } from "../../src/semantic/embed";
 import { createSemanticSearch, semanticSearch } from "../../src/semantic/search";
 import { runSync } from "../../src/sync/run";
 import { appFixture, emptyDb, fakeRaa, flodePost, openD1, UUID } from "../sync/helpers";
@@ -153,9 +153,10 @@ describe("runEmbedBatch", () => {
 		insertLamning(db, { uuid: uuidN(2), beskrivning: "Fångstgrop, rund, 3 m i diameter." });
 		const err = vi.spyOn(console, "error").mockImplementation(() => {});
 		try {
-			for (const msg of ["AiError: 3040: Capacity temporarily exceeded, please try again.", "InferenceUpstreamError: 502 Bad Gateway", "Request timed out", "AiError: 3036: You have used up your daily free allocation (rate limit)"]) {
+			const timeout = Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+			for (const msg of ["AiError: 3040: Capacity temporarily exceeded, please try again.", "InferenceUpstreamError: 502 Bad Gateway", "3007: Request timeout", timeout, "AiError: 3036: You have used up your daily free allocation of 10,000 neurons."]) {
 				ai.run = async () => {
-					throw new Error(msg);
+					throw typeof msg === "string" ? new Error(msg) : msg;
 				};
 				for (let k = 0; k < 4; k++) expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 0, klar: false });
 			}
@@ -165,6 +166,45 @@ describe("runEmbedBatch", () => {
 		expect(db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get()).toEqual({ n: 0 });
 		ai = new FakeAi();
 		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 2, klar: true });
+	});
+
+	it("klassningen av fel: bara HTTP-status, kända felkoder och feltyper är tillfälliga; okända fel är textens", () => {
+		const tillf = (x: unknown) => arTillfalligtAiFel(x);
+		// Granskningens fall: tidigare tillfälliga (\b5\d\d\b, "upstream"), nu fel på texten.
+		expect(tillf(new Error("Input text exceeds 512 tokens"))).toBe(false);
+		expect(tillf(new Error("InferenceUpstreamError: bad input"))).toBe(false);
+		expect(tillf(new Error("got 500 characters, expected at most 400"))).toBe(false);
+		expect(tillf(new Error("AiError: 3006: Request is too large"))).toBe(false);
+		expect(tillf(new Error("5004: Invalid data"))).toBe(false);
+		expect(tillf(new Error("något helt okänt"))).toBe(false);
+		// Tillfälliga.
+		expect(tillf(new Error("3040: Capacity temporarily exceeded, please try again."))).toBe(true);
+		expect(tillf(new Error("InferenceUpstreamError: 3008: Request was aborted"))).toBe(true);
+		expect(tillf(new Error("InferenceUpstreamError: 503 Service Unavailable"))).toBe(true);
+		expect(tillf(Object.assign(new Error("x"), { status: 429 }))).toBe(true);
+		expect(tillf(Object.assign(new Error("x"), { status: 400 }))).toBe(false);
+		expect(tillf(Object.assign(new Error("x"), { name: "AbortError" }))).toBe(true);
+		expect(tillf(new Error("Network connection lost."))).toBe(true);
+	});
+
+	it("en text som modellen avvisar med ett okänt fel isoleras genom halvering och bokförs", async () => {
+		insertLamning(db, { uuid: uuidN(1), beskrivning: "Kolbotten, rund, 12 m diam." });
+		insertLamning(db, { uuid: uuidN(2), beskrivning: "Fångstgrop, rund, 3 m i diameter. TRASIG" });
+		insertLamning(db, { uuid: uuidN(3), beskrivning: "Röjningsröse, 2 m diam." });
+		const inner = new FakeAi();
+		ai.run = async (model: "@cf/baai/bge-m3", input: { text: string[] }) => {
+			if (input.text.some((t) => t.includes("TRASIG"))) throw new Error("Input text exceeds 512 tokens");
+			return inner.run(model, input as never);
+		};
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const r = await runEmbedBatch(env());
+			expect(r).toMatchObject({ inbaddade: 2, fel: 1 });
+			expect(r.tillfalliga_fel ?? 0).toBe(0);
+		} finally {
+			err.mockRestore();
+		}
+		expect(db.prepare("SELECT uuid, forsok FROM inbaddning_fel").all()).toEqual([{ uuid: uuidN(2), forsok: 1 }]);
 	});
 
 	it("bäddar in lämningar inom omfånget efter nattsynken, i delar som kan återupptas", async () => {

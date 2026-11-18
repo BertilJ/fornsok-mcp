@@ -37,7 +37,7 @@ describe("1. socken med samma namn i samma län", () => {
 		const s = r.structuredContent as Structured;
 		expect(s.filter.socken).toEqual([{ namn: "Mo", lan: ["Västra Götaland"], kommun: ["Tanum", "Munkedal"] }]);
 		expect(ksQueries(calls)[0]).toContain('(parishName="Mo" AND countyName="Västra Götaland" AND (municipalityName="Tanum" OR municipalityName="Munkedal"))');
-		expect(s.anmarkningar.join(" ")).toMatch(/flera socknar som heter Mo i Västra Götaland; avgränsat till kommun Tanum, Munkedal\./);
+		expect(s.anmarkningar.join(" ")).toMatch(/flera socknar som heter Mo i Västra Götaland; avgränsat till kommun Tanum, Munkedal \(lämningar i socknen som saknar kommun i registret kommer inte med\)\./);
 	});
 
 	it("säger till när en kommun har båda socknarna", async () => {

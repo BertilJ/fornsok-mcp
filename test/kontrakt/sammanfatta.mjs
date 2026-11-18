@@ -12,11 +12,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cell, kod } from "./markdown.mjs";
 
 const rapportSokvag = process.argv[2] || process.env.KONTRAKT_RAPPORT || join(tmpdir(), "fornsok-kontrakt-rapport.json");
 const loggSokvag = process.argv[3] || process.env.KONTRAKT_LOGG || join(tmpdir(), "fornsok-kontrakt-anrop.jsonl");
 
-const cell = (s) => String(s).replace(/\|/g, "\\|").replace(/\n/g, " ").trim();
 const LINJE = /\[(FORMAT|OTILLGÄNGLIG)\] ([^\n]*?) \| ([^\n]*?) \| ([^\n]*)/g;
 
 function out(s = "") {
@@ -26,7 +26,7 @@ function out(s = "") {
 if (!existsSync(rapportSokvag)) {
 	out("## Kontrakttest mot RAÄ:s källor");
 	out();
-	out(`Ingen testrapport hittades (${rapportSokvag}). Testkörningen avbröts troligen innan den hann skriva en rapport; se loggen för steget.`);
+	out(`Ingen testrapport hittades (${cell(rapportSokvag)}). Testkörningen avbröts troligen innan den hann skriva en rapport; se loggen för steget.`);
 	process.exit(0);
 }
 
@@ -36,7 +36,7 @@ try {
 } catch (e) {
 	out("## Kontrakttest mot RAÄ:s källor");
 	out();
-	out(`Testrapporten gick inte att läsa: ${e instanceof Error ? e.message : String(e)}`);
+	out(`Testrapporten gick inte att läsa: ${cell(e instanceof Error ? e.message : String(e))}`);
 	process.exit(0);
 }
 
@@ -107,7 +107,7 @@ function tabell(rubrik, mapp, kolumner) {
 	out();
 	out(`| Källa | Anrop | ${kolumner} |`);
 	out("|---|---|---|");
-	for (const r of mapp.values()) out(`| ${cell(r.kalla)} | ${cell(r.anrop)} | ${r.falt ? `\`${cell(r.falt)}\`: ` : ""}${cell(r.avvikelse)} |`);
+	for (const r of mapp.values()) out(`| ${cell(r.kalla)} | ${cell(r.anrop)} | ${r.falt ? `${kod(r.falt)}: ` : ""}${cell(r.avvikelse)} |`);
 }
 
 tabell("Svarsformatet har ändrats", format, "Fält och avvikelse");

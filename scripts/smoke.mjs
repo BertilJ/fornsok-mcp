@@ -2,7 +2,11 @@
 /**
  * Röktest mot en körande server över MCP. Gör få, riktiga anrop mot RAÄ via
  * servern: tools/list och några tools/call med de tre fasta testposterna
- * (SPEC 10), inklusive ett inventeringsboksuppslag som bild.
+ * (SPEC 10), inklusive ett inventeringsboksuppslag som bild och relaterat
+ * material ur K-samsök. Varje lyckat svar ska ha en källrad ("Källa: …; …").
+ * Med --index frågar hitta_plats också OpenStreetMap Nominatim en gång
+ * (Bjursås: socknen ur indexet och orten ur OpenStreetMap), om inte servern
+ * har NOMINATIM="av".
  *
  *   node scripts/smoke.mjs [http://localhost:8787/mcp]
  *       Lokalt med utvecklingsläget på (ACCESS_DEV_BYPASS="true" i .dev.vars).
@@ -87,9 +91,10 @@ out("server", { ...info, instruktioner: (client.getInstructions() ?? "").slice(0
 const { tools } = await client.listTools();
 out("tools/list", tools.map((t) => ({ name: t.name, annotations: t.annotations, har_outputSchema: !!t.outputSchema })));
 check(
-	tools.map((t) => t.name).join(",") === "sok_lamningar,lamningar_nara,lamning,lamning_dokument,hamta_dokument,statistik,uppslag,hitta_plats",
-	`åtta verktyg i fast ordning (${tools.length})`,
+	tools.map((t) => t.name).join(",") === "sok_lamningar,lamningar_nara,lamning,lamning_dokument,hamta_dokument,relaterat,statistik,uppslag,hitta_plats",
+	`nio verktyg i fast ordning (${tools.length})`,
 );
+check(tools.every((t) => t.outputSchema && t.annotations?.readOnlyHint === true && t.inputSchema?.additionalProperties === false), "alla verktyg: outputSchema, läsande, strikt indata");
 
 async function call(name, args) {
 	const t0 = Date.now();
@@ -99,13 +104,15 @@ async function call(name, args) {
 		.map((c) => (c.type === "text" ? c.text : `[${c.type} ${c.mimeType ?? ""}, ${c.data ? Math.round((c.data.length * 3) / 4) : 0} byte]`))
 		.join("\n");
 	out(`tools/call ${name} ${JSON.stringify(args)} (${ms} ms)${r.isError ? " – FEL" : ""}`, text);
+	// Modellen i claude.ai ser bara texten: varje lyckat svar ska säga varifrån det kom och hur färskt det är.
+	if (!r.isError) check(/Källa: [^\n]+; [^\n]+\./.test(text), `${name}: källrad i texten`);
 	return r;
 }
 
 // lamning: de tre testposterna, via tre olika identitetsformer, med dokument och historik.
 const l = await call("lamning", {
 	id: ["L1946:7415", "Stora Kopparberg 172:1", "adc490ba-871a-45bd-8e3d-0a27761b3b6c"],
-	inkludera: ["geometri", "referenser", "dokument", "historik"],
+	inkludera: ["geometri", "referenser", "dokument", "historik", "relaterat"],
 });
 const posts = l.structuredContent?.lamningar ?? [];
 const nr = posts.map((p) => p.lamningsnummer).sort();
@@ -119,6 +126,9 @@ check((p7415?.dokument ?? []).some((d) => d.grupp === "inventeringsbok" && d.vis
 check((p7415?.historik ?? []).length >= 1, "L1946:7415: versionshistorik");
 const p8802 = posts.find((p) => p.lamningsnummer === "L2000:8802");
 check(p8802?.lamningstyp === "Hyttområde" && p8802?.raa_nummer === "Stora Kopparberg 172:1", "L2000:8802: hyttområde");
+// Relaterat material ur K-samsök (getRelations + relUri): inventeringsboksuppslag och äldre FMI-poster.
+check((p8802?.relaterat?.antal_per_slag?.["äldre post"] ?? 0) >= 1 && (p8802?.relaterat?.antal_per_slag?.arkivhandling ?? 0) >= 1, `L2000:8802: relaterat material (${JSON.stringify(p8802?.relaterat?.antal_per_slag)})`);
+check(!/finns inte än/.test(JSON.stringify(l.structuredContent?.anmarkningar ?? [])), "lamning: relaterat är byggt (ingen 'finns inte än')");
 if (medIndex) {
 	check(/^index \d{4}-\d{2}-\d{2}/.test(p646?.hamtad_fran ?? "") && /^index /.test(p8802?.hamtad_fran ?? ""), `lamning: Falu-posterna ur indexet (${p646?.hamtad_fran})`);
 	check((p646?.referenser?.skriftliga_kallor ?? null) !== null, "lamning: referenser till indexposten från Fornsök-appen");
@@ -155,7 +165,8 @@ check(Array.isArray(s.structuredContent?.sokkanaler) && typeof s.structuredConte
 check(s.structuredContent?.reservlage === !medIndex, `sok_lamningar: reservlage = ${!medIndex}`);
 if (medIndex) {
 	const u = (s.structuredContent?.traffar ?? []).find((t) => t.lamningsnummer === "L2001:646")?.utdrag ?? "";
-	check(u.includes("«"), "sok_lamningar: utdrag med markerad träff ur indexet");
+	// Träffarna i utdraget markeras med ⟦⟧ (src/extern_text.ts); «» är citattecken runt hela källtexten i texten.
+	check(u.includes("⟦") && u.includes("⟧"), "sok_lamningar: utdrag med markerad träff ur indexet");
 	const pre = await call("sok_lamningar", { fraga: "önskekäll*", kommun: ["Falun"], antal: 5 });
 	check((pre.structuredContent?.traffar ?? []).some((t) => t.lamningsnummer === "L2001:646"), "sok_lamningar: prefixsök önskekäll*");
 	const eg = await call("sok_lamningar", { egenskap: [{ typ: "material", varde: "koppar" }], lamningstyp: ["Hyttområde"], kommun: ["Falun"], antal: 3 });
@@ -186,6 +197,15 @@ if (medIndex) {
 // uppslag.
 const u = await call("uppslag", { lista: "socknar", sok: "Bjursås" });
 check(!u.isError && u.structuredContent?.varden?.[0]?.namn === "Bjursås", "uppslag hittar Bjursås");
+check(typeof u.structuredContent?.hamtad_fran === "string", `uppslag: hamtad_fran (${u.structuredContent?.hamtad_fran})`);
+
+// relaterat: Bjursås 27:1 har två inventeringsboksuppslag och en äldre FMI-post i K-samsök (2026-11-18).
+const rel = await call("relaterat", { id: "Bjursås 27:1" });
+const rs = rel.structuredContent ?? {};
+check(!rel.isError && rs.lamning?.uuid === "adc490ba-871a-45bd-8e3d-0a27761b3b6c" && (rs.antal_per_slag?.arkivhandling ?? 0) >= 1, `relaterat: Bjursås 27:1 (${JSON.stringify(rs.antal_per_slag)})`);
+check((rs.objekt ?? []).every((o) => o.slag && o.uri && "bilder" in o), "relaterat: varje objekt har slag, uri och bildfält");
+const relFilter = await call("relaterat", { id: "L2001:646", slag: ["äldre post"] });
+check(!relFilter.isError && (relFilter.structuredContent?.objekt ?? []).every((o) => o.slag === "äldre post"), "relaterat: filter på slag");
 
 // Semantisk sökning. Läget upptäcks ur serverns svar: "auto" inom omfånget ger
 // sokkanaler ["ord","betydelse"] när kanalen är ansluten, annars ["ord"].
@@ -217,11 +237,16 @@ if (medSemantik) {
 	check(e.isError === true, "lage=betydelse ger tydligt fel utan semantisk kanal");
 }
 
-// hitta_plats: en socken i indexet. Bara med index, så att röktestet inte anropar Nominatim.
+// hitta_plats: en socken i indexet, och orten ur OpenStreetMap (ett anrop till Nominatim,
+// sparas 30 dygn; med NOMINATIM="av" bara socknen). Bara med index.
 if (medIndex) {
 	const hp = await call("hitta_plats", { namn: "Bjursås" });
-	const kand = hp.structuredContent?.kandidater ?? [];
-	check(!hp.isError && kand.length > 0 && hp.structuredContent?.kalla === "index", `hitta_plats: ${kand.length} kandidater för Bjursås ur indexet`);
+	const hs = hp.structuredContent ?? {};
+	const kand = hs.kandidater ?? [];
+	check(!hp.isError && kand.some((k) => k.typ === "socken" && k.punkttyp === "omradets_lamningar"), `hitta_plats: socknen Bjursås ur indexet, märkt som mittpunkt för lämningarna (${hs.kalla})`);
+	check(kand.every((k) => typeof k.punkt === "string" && k.punkt.length > 0), "hitta_plats: varje kandidat säger vilken sorts punkt den är");
+	if (hs.kalla === "index+nominatim") check(kand[0]?.punkttyp === "ort", "hitta_plats: orten ur OpenStreetMap först");
+	else check(/avstängt|gick inte att nå/.test((hs.anmarkningar ?? []).join(" ")), "hitta_plats: utan OpenStreetMap säger svaret varför orten saknas");
 }
 
 await client.close();

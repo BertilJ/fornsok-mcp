@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { strikt } from "./schema";
 import { LAN, normalizeName } from "../lookup/names";
-import { READ_ONLY, type ToolDeps, ok, rad, runTool } from "./common";
+import { READ_ONLY, type ToolDeps, kallrad, ok, rad, runTool } from "./common";
 import { viaIndex } from "./via_index";
 
 const LISTOR = ["lamningstyper", "kategorier", "bedomningar", "egenskapstyper", "kommuner", "socknar", "landskap", "lan"] as const;
@@ -35,6 +35,8 @@ export const uppslagOutput = z.object({
 	visade: z.number().int(),
 	varden: z.array(varde),
 	kalla: z.string(),
+	/** Hur färsk listan är (samma uppgift som källraden i texten). */
+	hamtad_fran: z.string(),
 	anmarkning: z.string().optional(),
 });
 
@@ -60,10 +62,15 @@ export function registerUppslag(server: McpServer, deps: ToolDeps): void {
 export async function uppslag(args: UppslagArgs, deps: ToolDeps) {
 	let varden: Varde[] = [];
 	let kalla = "Fornsök-appens värdelistor (cachade)";
+	// Källraden i texten: källa utan datum, och hur färsk listan är.
+	let kallaText = kalla;
+	let hamtad_fran = "okänt när";
 	let anmarkning: string | undefined;
 
 	if (args.lista === "lan") {
 		kalla = "Fast tabell i servern";
+		kallaText = kalla;
+		hamtad_fran = "inbyggd i servern (länsindelningen ändras bara med koden)";
 		varden = LAN.map((l) => ({ namn: l.namn, kod: l.kod, fullstandigt_namn: l.fullt }));
 	} else if (args.lista === "egenskapstyper") {
 		// Finns inte i Fornsök-appens värdelistor; bara indexet har dem (ur GeoPackage-filen).
@@ -71,16 +78,22 @@ export async function uppslag(args: UppslagArgs, deps: ToolDeps) {
 			deps,
 			async (ix) => {
 				kalla = `Lämningsindex (D1); ${ix.hamtad_fran}`;
+				kallaText = "Lämningsindex (D1)";
+				hamtad_fran = ix.hamtad_fran;
 				varden = (await deps.index!.egenskaper()).map((e) => ({ namn: e.varde, typ: e.typ, antal: e.antal }));
 			},
 			async (orsak) => {
 				kalla = "–";
+				kallaText = "Lämningsindex (D1)";
+				hamtad_fran = `inte tillgängligt just nu (${orsak})`;
 				anmarkning = `Egenskapstyper finns bara i serverns eget lämningsindex, som inte är tillgängligt just nu (${orsak}). Egenskaper syns per lämning via verktyget lamning.`;
 			},
 		);
 	} else {
 		const d = await deps.domains.get();
 		if (d.kalla === "index") kalla = "Lämningsindex (D1): namn och koder som förekommer i registret";
+		kallaText = d.kalla === "index" ? "Lämningsindex (D1), namn och koder som förekommer i registret" : "Fornsök-appens värdelistor";
+		hamtad_fran = /^\d{4}-\d{2}-\d{2}/.test(d.hamtad ?? "") ? `listorna hämtade ${d.hamtad.slice(0, 10)}${d.kalla === "index" ? "" : " (cachas upp till 24 timmar)"}` : "okänt när listorna hämtades";
 		switch (args.lista) {
 			case "lamningstyper":
 				varden = d.lamningstyper.map((t) => ({ namn: t.namn, kategori: t.kategorier, aktiv: t.aktiv }));
@@ -121,7 +134,7 @@ export async function uppslag(args: UppslagArgs, deps: ToolDeps) {
 	const shown = varden.slice(0, MAX_ROWS);
 	if (totalt > MAX_ROWS) anmarkning = `Visar ${MAX_ROWS} av ${totalt}. Avgränsa med sok.`;
 
-	const structured = { lista: args.lista, sok: args.sok ?? null, totalt, visade: shown.length, varden: shown, kalla, ...(anmarkning ? { anmarkning } : {}) };
+	const structured = { lista: args.lista, sok: args.sok ?? null, totalt, visade: shown.length, varden: shown, kalla, hamtad_fran, ...(anmarkning ? { anmarkning } : {}) };
 	const lines: string[] = [];
 	lines.push(`${args.lista}${args.sok ? ` som innehåller "${args.sok}"` : ""}: ${totalt} värden.`);
 	for (const v of shown) {
@@ -137,6 +150,7 @@ export async function uppslag(args: UppslagArgs, deps: ToolDeps) {
 		if (v.typ !== undefined) extra.unshift(`${v.antal ?? 0} lämningar`);
 		lines.push(`- ${v.typ !== undefined ? `${rad(v.typ)}: ` : ""}${rad(v.namn)}${extra.length ? ` (${extra.join("; ")})` : ""}`);
 	}
-	if (anmarkning) lines.push(`Obs: ${anmarkning}`);
+	lines.push(kallrad(kallaText, hamtad_fran));
+	if (anmarkning) lines.push(`Obs: ${rad(anmarkning)}`);
 	return ok(lines.join("\n"), structured);
 }

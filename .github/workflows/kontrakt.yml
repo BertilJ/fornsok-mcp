@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   kontrakt:
-    name: Kontrakttester (cirka 25 anrop)
+    name: Kontrakttester (cirka 28 anrop)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

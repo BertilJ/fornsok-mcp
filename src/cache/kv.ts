@@ -4,7 +4,7 @@
  * aldrig fälla ett anrop – då hämtas från källan som vanligt.
  */
 import { domanerProblem } from "../lookup/domains";
-import type { DocumentSource, DokumentFil, DokumentFilSvar, DokumentLista, DomainSource, Domaner } from "../sources/types";
+import type { DocumentSource, DokumentFil, DokumentFilSvar, DokumentLista, DomainSource, Domaner, RelateratLista, RelationSource } from "../sources/types";
 
 /** Det lilla av KVNamespace som används (gör det lätt att testa). */
 export interface KvLike {
@@ -17,9 +17,13 @@ export const DOMANER_KV_TTL_S = 24 * 60 * 60;
 /** Dokumentlistor: 1 timme. */
 export const DOKUMENT_KV_TTL_S = 60 * 60;
 
+/** Relaterat material från K-samsök: 7 dygn (relationerna ändras sällan; K-samsök ligger ändå några dagar efter). */
+export const RELATERAT_KV_TTL_S = 7 * 24 * 60 * 60;
+
 /** Nycklarna har version så att ändrad form kan rullas ut utan att läsa gammalt. */
 export const DOMANER_KEY = "domaner:v1";
 export const dokumentKey = (uuid: string) => `dokument:v1:${uuid.toLowerCase()}`;
+export const relateratKey = (uuid: string) => `relaterat:v1:${uuid.toLowerCase()}`;
 
 export async function kvCached<T>(
 	kv: KvLike | undefined,
@@ -84,5 +88,22 @@ export class KvDocumentSource implements DocumentSource {
 
 	filUrl(fil: DokumentFil): string | null {
 		return this.inner.filUrl(fil);
+	}
+}
+
+function isRelateratLista(v: unknown): v is RelateratLista {
+	const r = v as RelateratLista | null;
+	return !!r && typeof r.uuid === "string" && Array.isArray(r.objekt) && typeof r.hamtad === "string" && Array.isArray(r.anmarkningar) && r.delvis_fel !== true;
+}
+
+/** Relaterat material via KV (7 dygn). Fel från K-samsök, och listor där en del inte kunde hämtas, cachas inte. */
+export class KvRelationSource implements RelationSource {
+	constructor(
+		private readonly inner: RelationSource,
+		private readonly kv: KvLike | undefined,
+	) {}
+
+	hamtaRelaterat(uuid: string): Promise<RelateratLista> {
+		return kvCached(this.kv, relateratKey(uuid), RELATERAT_KV_TTL_S, () => this.inner.hamtaRelaterat(uuid), isRelateratLista);
 	}
 }

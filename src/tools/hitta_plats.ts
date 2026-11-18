@@ -30,7 +30,7 @@ import type { D1Like } from "../store/d1";
 import { buildFtsQuery } from "../store/fts";
 import { checkAllowed } from "../upstream/allowlist";
 import { type FetchLike, Semaphore, SemaphoreTimeoutError, UpstreamClient } from "../upstream/client";
-import { READ_ONLY, citat, ok, rad, runTool } from "./common";
+import { READ_ONLY, citat, kallrad, ok, rad, runTool } from "./common";
 
 export const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
 export const NOMINATIM_TTL_S = 30 * 24 * 60 * 60;
@@ -48,6 +48,8 @@ export interface HittaPlatsDeps {
 	client: UpstreamClient;
 	/** false = Nominatim avstängt (inställningen NOMINATIM="av"). */
 	nominatim: boolean;
+	/** Hur färskt indexet är (samma text som `hamtad_fran` i övriga verktyg), om det går att avgöra. */
+	indexHamtadFran?: () => Promise<string | null>;
 	/** Väntan (för test). */
 	sleep?: (ms: number) => Promise<void>;
 	now?: () => number;
@@ -60,10 +62,12 @@ export function createHittaPlatsDeps(opts: {
 	/** Värdet av inställningen `NOMINATIM`; "av" stänger av tjänsten. */
 	nominatim?: string | null;
 	fetch?: FetchLike;
+	indexHamtadFran?: () => Promise<string | null>;
 }): HittaPlatsDeps {
 	return {
 		db: opts.db,
 		kv: opts.kv,
+		...(opts.indexHamtadFran ? { indexHamtadFran: opts.indexHamtadFran } : {}),
 		client: new UpstreamClient({
 			userAgent: userAgent(opts.contactUrl),
 			maxConcurrent: 1,
@@ -92,9 +96,20 @@ export const hittaPlatsInput = strikt("hitta_plats", {
 		.describe('Begränsa till ett län, t.ex. "Dalarna" eller "Dalarnas län".'),
 });
 
+/**
+ * Vilken sorts punkt koordinaten är. Ägarens test i claude.ai: "Bjursås" gav
+ * mittpunkten av socknens 375 lämningar, flera kilometer från kyrkbyn, och
+ * nästa steg mätte avstånd från den. Därför står punktens sort i varje kandidat.
+ */
+export const PUNKTTYPER = ["omradets_lamningar", "ort", "namngiven_lamning", "plats"] as const;
+
 const kandidat = z.object({
 	namn: z.string(),
 	typ: z.string(),
+	/** omradets_lamningar: mittpunkt för områdets registrerade lämningar; ort: ort enligt OpenStreetMap; namngiven_lamning; plats: annan plats i OpenStreetMap. */
+	punkttyp: z.enum(PUNKTTYPER),
+	/** Punktens sort i klartext, t.ex. "mittpunkt för socknens registrerade lämningar". */
+	punkt: z.string(),
 	kalla: z.string(),
 	lat: z.number(),
 	lon: z.number(),
@@ -113,7 +128,9 @@ export const hittaPlatsOutput = z.object({
 	namn: z.string(),
 	kommun: z.string().nullable(),
 	lan: z.string().nullable(),
-	kalla: z.enum(["index", "nominatim", "ingen"]),
+	kalla: z.enum(["index", "nominatim", "index+nominatim", "ingen"]),
+	/** Hur färskt svaret är (indexets datum, och om OpenStreetMap-svaret var sparat). */
+	hamtad_fran: z.string(),
 	kandidater: z.array(kandidat),
 	anmarkningar: z.array(z.string()),
 });
@@ -124,9 +141,11 @@ export type Kandidat = z.infer<typeof kandidat>;
 // ---------------------------------------------------------------- registrering
 
 export const HITTA_PLATS_BESKRIVNING =
-	"Ortnamn till koordinat (WGS 84, med SWEREF 99 TM i den strukturerade delen). Söker först i serverns index bland socknar, kommuner och namngivna lämningar " +
-	"(t.ex. källor och stenar med namn), och frågar OpenStreetMap Nominatim (bara Sverige) först om indexet inte ger något. " +
-	"Svaret är kandidater med koordinat, typ och källa; för socknar och kommuner är koordinaten mittpunkten av områdets lämningar. " +
+	"Ortnamn till koordinat (WGS 84, med SWEREF 99 TM i den strukturerade delen). Söker i serverns index bland socknar, kommuner och namngivna lämningar " +
+	"(t.ex. källor och stenar med namn), och i OpenStreetMap Nominatim (bara Sverige) när indexet inte ger något, när träffen är en socken eller kommun, " +
+	"eller när namnet inte är en namngiven lämning – så att orten själv (byn, tätorten) kommer med som egen kandidat. " +
+	"Varje kandidat säger vilken sorts punkt den är: \"mittpunkt för socknens/kommunens registrerade lämningar\" (en tyngdpunkt, ofta kilometer från kyrkbyn eller tätorten), " +
+	"\"ort enligt OpenStreetMap\" eller \"namngiven lämning\". Välj ortspunkten för \"nära orten\", områdets mittpunkt bara för området som helhet. " +
 	"Koordinaten kan skickas direkt till lamningar_nara. " +
 	"OpenStreetMap är ojämnt för äldre platser – torp, fäbodar, gruvor och försvunna gårdar hittas bättre via TORA i Riksarkivets koppling " +
 	"(om den finns); en koordinat därifrån kan skickas direkt till lamningar_nara.";
@@ -288,6 +307,8 @@ export async function sokIndex(
 		out.push({
 			namn: String(o.namn),
 			typ: niva,
+			punkttyp: "omradets_lamningar",
+			punkt: `mittpunkt för ${niva === "kommun" ? "kommunens" : "socknens"} registrerade lämningar`,
 			kalla: "Lämningsindex (D1)",
 			...geo(lat, lon),
 			kommun: niva === "kommun" ? String(o.namn) : c.kommun,
@@ -342,6 +363,8 @@ export async function sokIndex(
 			out.push({
 				namn: String(l.namn),
 				typ: `lämning (${str(l.lamningstyp) ?? "okänd typ"})`,
+				punkttyp: "namngiven_lamning",
+				punkt: Number(l.exakt) === 0 ? "namngiven lämning (lämningens mittpunkt)" : "lämning vars namn innehåller sökorden (lämningens mittpunkt)",
 				kalla: "Lämningsindex (D1)",
 				...geo(lat, lon),
 				kommun: str(l.kommun),
@@ -498,6 +521,12 @@ export async function nominatim(
 	return { traffar, cachad: false };
 }
 
+/** Bebyggelse i OpenStreetMap (place=city/town/village/hamlet …): "orten". */
+const ORTSTYPER = new Set(["city", "town", "village", "hamlet", "isolated_dwelling", "farm", "locality", "suburb", "quarter", "neighbourhood", "borough"]);
+function arOrt(t: NominatimTraff): boolean {
+	return t.category === "place" && ORTSTYPER.has(t.type ?? "");
+}
+
 export function nominatimKandidater(traffar: NominatimTraff[]): Kandidat[] {
 	const out: Kandidat[] = [];
 	for (const t of traffar) {
@@ -506,9 +535,12 @@ export function nominatimKandidater(traffar: NominatimTraff[]): Kandidat[] {
 		if (!Number.isFinite(lat) || !Number.isFinite(lon) || !isInSweden({ lat, lon })) continue;
 		const a = t.address ?? {};
 		const bb = (t.boundingbox ?? []).map(Number);
+		const ort = arOrt(t);
 		out.push({
 			namn: t.name || t.display_name || "(namnlös)",
 			typ: [t.category, t.type].filter(Boolean).join("/") || t.addresstype || "plats",
+			punkttyp: ort ? "ort" : "plats",
+			punkt: ort ? "ort enligt OpenStreetMap" : "plats enligt OpenStreetMap",
 			kalla: "OpenStreetMap Nominatim",
 			...geo(lat, lon),
 			// Nominatim ger kommunen i genitiv ("Falu kommun"); den lämnas som den är.
@@ -530,6 +562,27 @@ export function nominatimKandidater(traffar: NominatimTraff[]): Kandidat[] {
 
 // ---------------------------------------------------------------- verktyget
 
+/**
+ * Ska OpenStreetMap också frågas? Ja när indexet inte gav något, när någon
+ * träff är ett område (socken eller kommun: dess punkt är en tyngdpunkt, inte
+ * orten), och när ingen träff är en lämning med exakt det namnet (då kan
+ * frågan avse en ort). Bara när namnet är exakt en namngiven lämning räcker indexet.
+ */
+export function behoverOrt(namn: string, kandidater: readonly Kandidat[]): boolean {
+	if (kandidater.length === 0) return true;
+	if (kandidater.some((k) => k.punkttyp === "omradets_lamningar")) return true;
+	const v = new Set(namnvarianter(namn));
+	return !kandidater.some((k) => k.punkttyp === "namngiven_lamning" && v.has(k.namn));
+}
+
+function km(a: Kandidat, b: Kandidat): number {
+	return Math.hypot(a.sweref99tm.e - b.sweref99tm.e, a.sweref99tm.n - b.sweref99tm.n) / 1000;
+}
+
+function fmtKm(x: number): string {
+	return x < 10 ? x.toFixed(1).replace(".", ",") : String(Math.round(x));
+}
+
 export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 	const namn = norm(args.namn);
 	if (!namn) throw new ToolInputError("Ange ett namn.");
@@ -544,13 +597,15 @@ export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 		lan = hit.namn;
 	}
 	const anmarkningar: string[] = [];
-	let kandidater: Kandidat[] = [];
-	let kalla: "index" | "nominatim" | "ingen" = "ingen";
+	let franIndex: Kandidat[] = [];
+	let franOsm: Kandidat[] = [];
+	let indexSvarade = false;
+	let osm: "ej" | "nu" | "sparat" | "fel" = "ej";
 
 	if (deps.db) {
 		try {
-			kandidater = await sokIndex(deps.db, namn, kommun, lan);
-			if (kandidater.length) kalla = "index";
+			franIndex = await sokIndex(deps.db, namn, kommun, lan);
+			indexSvarade = true;
 		} catch (e) {
 			// Loggas som fel (syns i wrangler tail och Workers-loggarna), med steg och tid.
 			console.error(
@@ -566,27 +621,43 @@ export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 		}
 	} else anmarkningar.push("Indexet är inte inkopplat; sökte i OpenStreetMap.");
 
-	if (!kandidater.length) {
+	const omrade = franIndex.find((k) => k.punkttyp === "omradets_lamningar") ?? null;
+	if (behoverOrt(namn, franIndex)) {
 		if (!deps.nominatim) {
-			anmarkningar.push("Uppslag i OpenStreetMap Nominatim är avstängt på den här servern.");
+			anmarkningar.push(
+				omrade
+					? `Uppslag i OpenStreetMap Nominatim är avstängt på den här servern, så orten ${namn} finns inte med som egen punkt. ${omrade.typ === "kommun" ? "Kommunens" : "Socknens"} punkt är mittpunkten för dess registrerade lämningar, inte orten.`
+					: "Uppslag i OpenStreetMap Nominatim är avstängt på den här servern.",
+			);
 		} else {
 			try {
-				const { traffar, cachad } = await nominatim(
-					deps,
-					nominatimFraga(namn, kommun, lan),
-				);
-				kandidater = nominatimKandidater(traffar).slice(0, MAX_KANDIDATER);
-				if (kandidater.length) {
-					kalla = "nominatim";
-					anmarkningar.push(
-						`Källa: OpenStreetMap Nominatim${cachad ? " (sparat svar)" : ""}. ${NOMINATIM_ATTRIBUTION}.`,
-					);
-				}
+				const { traffar, cachad } = await nominatim(deps, nominatimFraga(namn, kommun, lan));
+				osm = cachad ? "sparat" : "nu";
+				franOsm = nominatimKandidater(traffar);
+				if (franOsm.length) anmarkningar.push(`OpenStreetMap Nominatim${cachad ? " (sparat svar)" : ""}: ${NOMINATIM_ATTRIBUTION}.`);
 			} catch (e) {
 				if (!(e instanceof UpstreamError)) throw e;
-				anmarkningar.push(`OpenStreetMap Nominatim gick inte att nå (${e.message}).`);
+				osm = "fel";
+				anmarkningar.push(
+					`OpenStreetMap Nominatim gick inte att nå (${e.message}).${omrade ? ` Orten finns därför inte med som egen punkt; ${omrade.typ === "kommun" ? "kommunens" : "socknens"} punkt är mittpunkten för dess registrerade lämningar, inte orten.` : ""}`,
+				);
 			}
 		}
+	}
+
+	// Ordning: orter (OpenStreetMap) först när de finns, sedan indexets träffar, sist övriga platser i OpenStreetMap.
+	const orter = franOsm.filter((k) => k.punkttyp === "ort");
+	const ovriga = franOsm.filter((k) => k.punkttyp !== "ort");
+	const kandidater = [...orter, ...franIndex, ...ovriga].slice(0, MAX_KANDIDATER);
+	const harIndex = kandidater.some((k) => k.kalla !== "OpenStreetMap Nominatim");
+	const harOsm = kandidater.some((k) => k.kalla === "OpenStreetMap Nominatim");
+	const kalla: "index" | "nominatim" | "index+nominatim" | "ingen" = harIndex && harOsm ? "index+nominatim" : harIndex ? "index" : harOsm ? "nominatim" : "ingen";
+
+	const ort = kandidater.find((k) => k.punkttyp === "ort") ?? null;
+	if (ort && omrade) {
+		anmarkningar.unshift(
+			`Orten ${ort.namn} enligt OpenStreetMap ligger ${fmtKm(km(ort, omrade))} km från mittpunkten för ${omrade.typ === "kommun" ? "kommunens" : "socknens"} registrerade lämningar. Använd ortspunkten för "nära ${namn}"; områdets mittpunkt bara för området som helhet (radien behöver då täcka utbredningen).`,
+		);
 	}
 	if (!kandidater.length) {
 		anmarkningar.push(
@@ -594,15 +665,35 @@ export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 		);
 	}
 
-	const structured = { namn, kommun, lan, kalla, kandidater, anmarkningar };
+	// Källrad: varifrån och hur färskt.
+	const delar: string[] = [];
+	if (harIndex || indexSvarade) {
+		let ixDatum: string | null = null;
+		try {
+			ixDatum = deps.indexHamtadFran ? await deps.indexHamtadFran() : null;
+		} catch {
+			ixDatum = null;
+		}
+		delar.push(ixDatum ?? "index (datum okänt)");
+	}
+	if (osm !== "ej") delar.push(osm === "sparat" ? "OpenStreetMap sparat svar (högst 30 dygn)" : osm === "nu" ? "OpenStreetMap hämtat nu" : "OpenStreetMap svarade inte");
+	const hamtad_fran = delar.join("; ") || "inget uppslag gjordes";
+	const kallaText =
+		kalla === "index+nominatim"
+			? "serverns lämningsindex och OpenStreetMap Nominatim"
+			: kalla === "index"
+				? "serverns lämningsindex"
+				: kalla === "nominatim"
+					? "OpenStreetMap Nominatim"
+					: [indexSvarade ? "serverns lämningsindex" : null, osm !== "ej" ? "OpenStreetMap Nominatim" : null].filter(Boolean).join(" och ") || "ingen källa kunde frågas";
+
+	const structured = { namn, kommun, lan, kalla, hamtad_fran, kandidater, anmarkningar };
 	const lines: string[] = [];
 	const avgr = [kommun ? `kommun ${kommun}` : null, lan ? `län ${lan}` : null]
 		.filter(Boolean)
 		.join(", ");
 	if (kandidater.length) {
-		lines.push(
-			`${kandidater.length} kandidat${kandidater.length === 1 ? "" : "er"} för "${namn}"${avgr ? ` (${avgr})` : ""}, källa: ${kalla === "index" ? "serverns lämningsindex" : "OpenStreetMap Nominatim"}.`,
-		);
+		lines.push(`${kandidater.length} kandidat${kandidater.length === 1 ? "" : "er"} för "${namn}"${avgr ? ` (${avgr})` : ""}. Varje rad säger vilken sorts punkt koordinaten är.`);
 		kandidater.forEach((k, i) => {
 			const omradeText = [
 				k.kommun ? (/kommun$/.test(k.kommun) ? k.kommun : `${k.kommun} kommun`) : null,
@@ -610,17 +701,20 @@ export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 			]
 				.filter(Boolean)
 				.join(", ");
-			const extra = k.lamningsnummer
-				? ` ${k.lamningsnummer} ${k.url ?? ""}`
-				: k.antal_lamningar
-					? ` (${k.antal_lamningar} lämningar)`
-					: "";
+			const punkt =
+				k.punkttyp === "omradets_lamningar"
+					? `${k.punkt}${k.antal_lamningar ? ` (${k.antal_lamningar} ${k.antal_lamningar === 1 ? "lämning" : "lämningar"})` : ""} – inte orten`
+					: k.punkttyp === "ort" || k.punkttyp === "plats"
+						? `${k.punkt} (${rad(k.typ)})`
+						: `${k.punkt}, ${rad(k.typ)}`;
+			const extra = k.lamningsnummer ? ` ${rad(k.lamningsnummer)} ${k.url ?? ""}` : "";
 			lines.push(
-				`${i + 1}. ${citat(k.namn)} – ${rad(k.typ)}${omradeText ? `, ${rad(omradeText)}` : ""}: ${k.lat.toFixed(5)}, ${k.lon.toFixed(5)}.${extra}`.trim(),
+				`${i + 1}. ${citat(k.namn)} – ${punkt}${omradeText ? `, ${rad(omradeText)}` : ""}: ${k.lat.toFixed(5)}, ${k.lon.toFixed(5)}.${extra}`.trim(),
 			);
 		});
 		lines.push("Koordinaten kan skickas direkt till lamningar_nara (lat, lon).");
 	} else lines.push(`Ingen plats hittades för "${namn}"${avgr ? ` (${avgr})` : ""}.`);
-	for (const a of anmarkningar) lines.push(`Obs: ${a}`);
+	lines.push(kallrad(kallaText, hamtad_fran));
+	for (const a of anmarkningar) lines.push(`Obs: ${rad(a)}`);
 	return ok(lines.join("\n"), structured);
 }

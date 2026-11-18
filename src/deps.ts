@@ -3,11 +3,12 @@
  * värdelistor och dokumentlistor), indexet i D1 när bindningen finns, och den
  * semantiska kanalen när den är ansluten.
  */
-import { type KvLike, KvDocumentSource, KvDomainSource } from "./cache/kv";
+import { type KvLike, KvDocumentSource, KvDomainSource, KvRelationSource } from "./cache/kv";
 import { userAgent } from "./config";
 import { DomainService } from "./lookup/domains";
 import { FallbackDomainSource, IndexDomainSource } from "./lookup/index_domaner";
 import { FornsokAppSource } from "./sources/fornsokapp/source";
+import { KsamsokRelationSource } from "./sources/ksamsok/relations";
 import { KsamsokSource } from "./sources/ksamsok/source";
 import { OgcSource } from "./sources/ogc/source";
 import type { SemanticSearch } from "./sources/types";
@@ -46,7 +47,18 @@ export function createDeps(options: DepsOptions = {}): ToolDeps {
 		deps.index = new IndexAccess(new IndexStore(db), { kv: live.kv });
 		if (semantic) deps.semantic = semantic;
 		// hitta_plats söker först bland indexets namn.
-		deps.plats = createHittaPlatsDeps({ db, kv: live.kv, contactUrl: live.contactUrl, nominatim: live.nominatim, fetch: live.fetch });
+		const index = deps.index;
+		deps.plats = createHittaPlatsDeps({
+			db,
+			kv: live.kv,
+			contactUrl: live.contactUrl,
+			nominatim: live.nominatim,
+			fetch: live.fetch,
+			indexHamtadFran: async () => {
+				const o = await index.open();
+				return o.ok ? o.hamtad_fran : null;
+			},
+		});
 	}
 	return deps;
 }
@@ -74,6 +86,7 @@ export function createLiveDeps(options: LiveDepsOptions & { domainDb?: D1Like } 
 		domains,
 		documents: new KvDocumentSource(app, kv),
 		history: app,
+		relations: new KvRelationSource(new KsamsokRelationSource(client), kv),
 		// Utan index går hitta_plats direkt till Nominatim.
 		plats: createHittaPlatsDeps({ kv, contactUrl, nominatim, fetch: clientOptions.fetch }),
 	};

@@ -7,7 +7,8 @@
 import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DomainService } from "../../src/lookup/domains";
-import { FallbackDomainSource, IndexDomainSource, KOPIA_LAS, KOPIA_NYCKEL, sparaKopiaSats } from "../../src/lookup/index_domaner";
+import { iBakgrunden, medBakgrund } from "../../src/bakgrund";
+import { FallbackDomainSource, HAMTNING_MAX_MS, IndexDomainSource, KOPIA_LAS, KOPIA_NYCKEL, sparaKopiaSats } from "../../src/lookup/index_domaner";
 import type { DomainSource, Domaner } from "../../src/sources/types";
 import { fullRecomputeSql } from "../../src/store/omraden";
 import { runSync } from "../../src/sync/run";
@@ -121,6 +122,32 @@ describe("namnuppslag: socknar med samma namn i samma län (testurvalet, alltid)
 		}
 	});
 
+	it("kommunavgränsad socken: lämningar i socknen utan kommun i registret utesluts avsiktligt, och svaret säger det (granskningen, punkt 5)", async () => {
+		// En lämning i Mo (Västra Götaland) med län men utan kommun (som 30 lämningar i hela landet).
+		const { id, uuid } = raw.prepare("SELECT id, uuid FROM lamning ORDER BY id LIMIT 1 OFFSET 20").get() as { id: number; uuid: string };
+		raw.prepare("DELETE FROM lamning_omrade WHERE lamning_id = ?").run(id);
+		raw.prepare("INSERT INTO lamning_omrade (omrade_id, lamning_id) SELECT id, ? FROM omrade WHERE niva = 'socken' AND namn = 'Mo' AND lan = 'Västra Götaland'").run(id);
+		raw.prepare("INSERT INTO lamning_omrade (omrade_id, lamning_id) SELECT id, ? FROM omrade WHERE niva = 'lan' AND namn = 'Västra Götaland' AND lan = ''").run(id);
+		raw.exec("DELETE FROM omrade_sammanfattning; DELETE FROM omrade_relation; DELETE FROM niva_sammanfattning;");
+		for (const sql of fullRecomputeSql()) raw.exec(sql);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const c = await connectMcp(utanAppensListor(), { db: d1FromSqlite(raw) });
+		try {
+			const r = await c.client.callTool({ name: "sok_lamningar", arguments: { socken: ["Mo (Tanum)"], antal: 50 } });
+			const s = r.structuredContent as S;
+			expect(s.traffar.map((t: S) => t.uuid).sort()).toEqual([...platser["Mo (Tanum)"]].sort());
+			expect(s.traffar.some((t: S) => t.uuid === uuid)).toBe(false);
+			expect(text(r)).toMatch(/lämningar i socknen som saknar kommun i registret kommer inte med/);
+			// Lämningen finns i indexet, med socknen Mo men utan kommun.
+			const l = await c.client.callTool({ name: "lamning", arguments: { id: [uuid] } });
+			const post = (l.structuredContent as S).lamningar[0];
+			expect(post.indelning).toMatchObject({ socken: ["Mo"], kommun: [] });
+		} finally {
+			await c.client.close();
+			warn.mockRestore();
+		}
+	});
+
 	it("utan kopia men appen svarar: listorna hämtas och sparas vid första uppslaget, och Mo (Tanum) avgränsas", async () => {
 		const c = await connectMcp(standardRoutes(), { db: d1FromSqlite(raw) });
 		try {
@@ -169,6 +196,55 @@ describe("namnuppslag: socknar med samma namn i samma län (testurvalet, alltid)
 		} finally {
 			warn.mockRestore();
 		}
+	});
+
+	it("en hämtning som aldrig avgörs (avbruten förfrågan) anmäls till waitUntil och delas högst HAMTNING_MAX_MS", async () => {
+		let t = Date.parse("2026-11-18T10:00:00Z");
+		let anrop = 0;
+		const app: DomainSource = {
+			loadDomaner: () => {
+				anrop++;
+				return new Promise<never>(() => {});
+			},
+		};
+		const src = new IndexDomainSource(d1FromSqlite(raw), { app, vantaMs: 300, now: () => t });
+		const anmalda: Array<Promise<unknown>> = [];
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const d1 = await medBakgrund({ waitUntil: (p) => anmalda.push(p) }, () => src.loadDomaner());
+			expect(anrop).toBe(1);
+			expect(d1.kortlivad).toBe(true);
+			// Hämtningen är anmäld till förfrågans waitUntil, så att Workers låter den löpa klart.
+			expect(anmalda).toHaveLength(1);
+			// Inom tidsgränsen delas den (inget nytt anrop; uppslaget väntar högst vantaMs).
+			t += 1000;
+			await src.loadDomaner();
+			expect(anrop).toBe(1);
+			// Efter tidsgränsen hänger uppslaget inte längre på det gamla löftet: en ny hämtning
+			// prövas (låset från den övergivna gäller ännu, så ingen väntan alls).
+			t += HAMTNING_MAX_MS;
+			const t0 = Date.now();
+			const d3 = await src.loadDomaner();
+			expect(Date.now() - t0).toBeLessThan(250);
+			expect(d3.kortlivad).toBe(true);
+			// När låset har gått ut hämtas listorna på nytt.
+			t += 3 * 60 * 1000;
+			await src.loadDomaner();
+			expect(anrop).toBe(2);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("bakgrundskontexten följer med över await och timers, och saknas utanför en förfrågan", async () => {
+		const anmalda: Array<Promise<unknown>> = [];
+		expect(iBakgrunden(Promise.resolve())).toBe(false);
+		await medBakgrund({ waitUntil: (p) => anmalda.push(p) }, async () => {
+			await new Promise((r) => setTimeout(r, 5));
+			expect(iBakgrunden(Promise.reject(new Error("sväljs")))).toBe(true);
+		});
+		expect(anmalda).toHaveLength(1);
+		await expect(anmalda[0]).resolves.toBeUndefined();
 	});
 
 	it("gammal kopia: används direkt, och en ny hämtas i bakgrunden", async () => {

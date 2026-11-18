@@ -6,7 +6,16 @@
 import { DOMAIN_CACHE_TTL_MS } from "../config";
 import { ToolInputError, UpstreamError } from "../errors";
 import type { DomainSource, Domaner, Kommun, Socken } from "../sources/types";
+import { rensaRad as rad } from "../extern_text";
 import { LAN, didYouMean, findLan, lanByKod, normalizeName, suggest, suggestLan } from "./names";
+
+/**
+ * En relation socken → kommun räknas bara om minst så stor andel av socknens
+ * lämningar ligger i kommunen, eller om den är socknens största kommun (listor
+ * ur indexet, lookup/index_domaner.ts). Annars skulle en enstaka lämning som
+ * korsar en kommun- eller länsgräns ge socknen en kommun (och ett län) den inte hör till.
+ */
+export const RELATION_MIN_ANDEL = 0.05;
 
 export interface ResolvedSocken {
 	namn: string;
@@ -32,6 +41,14 @@ export function domanerProblem(d: Domaner | null | undefined): string | null {
 	const tomma = (["lamningstyper", "kommuner", "socknar", "landskap"] as const).filter((k) => !Array.isArray(d[k]) || d[k].length === 0);
 	if (tomma.length) return `tomma listor: ${tomma.join(", ")}`;
 	if (d.lamningstyper.some((t) => !t.namn) || d.kommuner.some((k) => !k.namn || !k.kod)) return "poster utan namn eller kod";
+	// Även listorna som får vara tomma ska finnas och ha rätt form, och kopian ska ha ett giltigt datum
+	// (en sparad kopia i D1 eller KV kan vara skriven av en äldre version eller vara skadad).
+	const felForm = (["lan", "kategorier", "bedomningar"] as const).filter((k) => !Array.isArray(d[k]));
+	if (felForm.length) return `listor saknas: ${felForm.join(", ")}`;
+	if (d.socknar.some((x) => !x || typeof x.namn !== "string" || !x.namn || !Array.isArray(x.kommunkoder))) return "socknar utan namn eller kommunkoder";
+	if (d.lan.some((l) => !l || typeof l.namn !== "string" || !l.namn)) return "län utan namn";
+	if (d.kategorier.some((k) => typeof k !== "string")) return "kategorier som inte är text";
+	if (typeof d.hamtad !== "string" || !Number.isFinite(Date.parse(d.hamtad))) return "hämtningsdatum saknas eller är ogiltigt";
 	return null;
 }
 
@@ -213,13 +230,39 @@ export class DomainService {
 		return [...out];
 	}
 
+	/** Samma regel som kvalificeraren i resolveSocknar: länet, eller en av socknens kommuner. */
+	private matcharKvalificerare(s: Socken, qual: string, d: Domaner): boolean {
+		const lan = findLan(qual);
+		const kommun = d.kommuner.find((k) => normalizeName(k.namn) === normalizeName(qual).replace(/ kommun$/, ""));
+		return !!((lan && this.lanForSocken(s).includes(lan.namn)) || (kommun && s.kommunkoder.includes(kommun.kod)));
+	}
+
+	/**
+	 * En kvalificerare som pekar ut `s` bland `kandidater`, t.ex. "Mo (Gävleborg)"
+	 * eller "Mo (Munkedal)": länet om det räcker, annars en av socknens kommuner.
+	 * null om ingen gör det.
+	 */
+	private sarskiljande(s: Socken, kandidater: readonly Socken[], d: Domaner): string | null {
+		const prova = (qual: string) => kandidater.filter((c) => this.matcharKvalificerare(c, qual, d)).length === 1 && this.matcharKvalificerare(s, qual, d);
+		const lan = this.lanForSocken(s);
+		// Länet när socknen ligger i ett enda län som ingen annan kandidat har; annars en kommun
+		// (en socken över länsgräns, t.ex. Mo i Åmål och Säffle, pekas hellre ut med kommunen).
+		if (lan.length === 1 && prova(lan[0])) return `${rad(s.namn)} (${rad(lan[0])})`;
+		for (const kod of s.kommunkoder) {
+			const namn = d.kommuner.find((x) => x.kod === kod)?.namn;
+			if (namn && prova(namn)) return `${rad(s.namn)} (${rad(namn)})`;
+		}
+		for (const l of lan) if (prova(l)) return `${rad(s.namn)} (${rad(l)})`;
+		return null;
+	}
+
 	private describeSocken(s: Socken, d: Domaner): string {
 		const lan = this.lanForSocken(s);
 		const kommuner = s.kommunkoder
 			.map((k) => d.kommuner.find((x) => x.kod === k)?.namn)
 			.filter((x): x is string => !!x);
 		const kom = kommuner.length ? `: ${[...new Set(kommuner)].join(", ")}` : "";
-		return `${s.namn} (${lan.join("/") || "okänt län"}${kom})`;
+		return `${rad(s.namn)} (${lan.join("/") || "okänt län"}${rad(kom)})`;
 	}
 
 	/**
@@ -254,19 +297,18 @@ export class DomainService {
 					const kommun = d.kommuner.find((k) => normalizeName(k.namn) === normalizeName(qual).replace(/ kommun$/, ""));
 					const matches = (lan && this.lanForSocken(s).includes(lan.namn)) || (kommun && s.kommunkoder.includes(kommun.kod));
 					if (!matches) {
+						const enstaka = kommun && s.enstaka_kommunkoder?.includes(kommun.kod)
+							? ` Serverns index har bara enstaka lämningar i socknen i ${rad(kommun.namn)} (under ${Math.round(RELATION_MIN_ANDEL * 100)} % av socknens), så kommunen räknas inte som socknens; sök med kommun ${rad(kommun.namn)} utan socken för dem.`
+							: "";
 						throw new ToolInputError(
-							`Socknen "${s.namn}" finns bara i ${this.describeSocken(s, d)}, inte i "${qual}". Ange socknen utan kvalificerare eller med rätt län/kommun.`,
+							`Socknen "${rad(s.namn)}" finns bara i ${this.describeSocken(s, d)}, inte i "${rad(qual)}". Ange socknen utan kvalificerare eller med rätt län/kommun.${enstaka}`,
 							{ kandidater: [this.describeSocken(s, d)] },
 						);
 					}
 				}
 				if (candidates.length > 1 && qualifier) {
 					const qual = qualifier;
-					const lan = findLan(qual);
-					const kommun = d.kommuner.find((k) => normalizeName(k.namn) === normalizeName(qual).replace(/ kommun$/, ""));
-					candidates = candidates.filter(
-						(s) => (lan && this.lanForSocken(s).includes(lan.namn)) || (kommun && s.kommunkoder.includes(kommun.kod)),
-					);
+					candidates = candidates.filter((s) => this.matcharKvalificerare(s, qual, d));
 				}
 				if (candidates.length > 1 && kontext.kommunkoder?.length) {
 					const narrowed = candidates.filter((s) => s.kommunkoder.some((k) => kontext.kommunkoder?.includes(k)));
@@ -278,16 +320,36 @@ export class DomainService {
 				}
 				if (candidates.length === 0) {
 					const all = d.socknar.filter((s) => normalizeName(s.namn) === q);
+					const qual = qualifier ?? "";
+					const kommun = d.kommuner.find((k) => normalizeName(k.namn) === normalizeName(qual).replace(/ kommun$/, ""));
+					// Indexets listor: socknen har bara enstaka lämningar i kommunen (under 5 %), som därför inte räknas som socknens.
+					const enstaka = kommun ? all.filter((s) => s.enstaka_kommunkoder?.includes(kommun.kod)) : [];
+					if (kommun && enstaka.length) {
+						const forslag = enstaka.map((s) => this.sarskiljande(s, all, d)).filter((x): x is string => !!x);
+						throw new ToolInputError(
+							`Ingen socken "${rad(raw)}" i kommunen ${rad(kommun.namn)} enligt serverns index: ${enstaka.map((s) => this.describeSocken(s, d)).join("; ")} har bara enstaka lämningar i ${rad(kommun.namn)} (under ${Math.round(RELATION_MIN_ANDEL * 100)} % av socknens), så kommunen räknas inte som socknens. ` +
+								`Ange socknens egen kommun${forslag.length ? `, t.ex. "${forslag[0]}"` : ""}, eller sök med kommun ${rad(kommun.namn)} utan socken.`,
+							{ kandidater: all.map((s) => this.describeSocken(s, d)) },
+						);
+					}
 					throw new ToolInputError(
-						`Ingen socken "${raw}" i "${qualifier}". Kandidater: ${all.map((s) => this.describeSocken(s, d)).join("; ")}.`,
+						`Ingen socken "${rad(raw)}" i "${rad(qualifier)}". Kandidater: ${all.map((s) => this.describeSocken(s, d)).join("; ")}.`,
 						{ kandidater: all.map((s) => this.describeSocken(s, d)) },
 					);
 				}
 				if (candidates.length > 1) {
 					const list = candidates.map((s) => this.describeSocken(s, d));
+					// Föreslå en kvalificerare som faktiskt skiljer kandidaterna åt (län när de ligger i olika län, annars kommun).
+					const forslag = candidates.map((s) => this.sarskiljande(s, candidates, d));
+					const giltiga = forslag.filter((x): x is string => !!x);
+					const ej = candidates.filter((_, i) => !forslag[i]).map((s) => this.describeSocken(s, d));
 					throw new ToolInputError(
-						`Socknen "${input}" är flertydig – ${candidates.length} socknar heter så: ${list.join("; ")}. Ange län eller kommun, t.ex. "${candidates[0].namn} (${this.lanForSocken(candidates[0])[0] ?? "län"})".`,
-						{ kandidater: list },
+						`Socknen "${rad(input)}" är flertydig – ${candidates.length} socknar heter så: ${list.join("; ")}. ` +
+							(giltiga.length
+								? `Ange en kvalificerare som skiljer dem åt: ${giltiga.map((g) => `"${g}"`).join(", ")}.`
+								: "Län och kommun skiljer dem inte åt; sök med kommun och fritext, eller på lämningsnummer.") +
+							(giltiga.length && ej.length ? ` ${ej.join("; ")} kan inte skiljas från de andra med län eller kommun.` : ""),
+						{ kandidater: list, ...(giltiga.length ? { forslag: giltiga } : {}) },
 					);
 				}
 				const s = candidates[0];
@@ -310,7 +372,7 @@ export class DomainService {
 					} else if (delade.length) {
 						out.anmarkning = `Det finns flera socknar som heter ${s.namn} i ${lan.join("/")}; avgränsat till kommun ${out.kommun.join(", ")}, men ${delade.join(", ")} har också en annan socken ${s.namn}, så träffar där kan höra till den.`;
 					} else {
-						out.anmarkning = `Det finns flera socknar som heter ${s.namn} i ${lan.join("/")}; avgränsat till kommun ${out.kommun.join(", ")}.`;
+						out.anmarkning = `Det finns flera socknar som heter ${s.namn} i ${lan.join("/")}; avgränsat till kommun ${out.kommun.join(", ")} (lämningar i socknen som saknar kommun i registret kommer inte med).`;
 					}
 				}
 				return out;
@@ -348,7 +410,7 @@ export class DomainService {
 			kommun: kommuner,
 			anmarkning:
 				`Det finns flera socknar som heter ${s.namn} i ${lanText}, och serverns index skiljer inte på dem (Fornsök-appens värdelista gick inte att hämta). ` +
-				`Sökningen gäller lämningar i en socken ${s.namn} som ligger i ${kommuner.join(", ")} kommun; ligger fler av socknarna i samma kommun kan träffar från dem komma med.`,
+				`Sökningen gäller lämningar i en socken ${s.namn} som ligger i ${kommuner.join(", ")} kommun; ligger fler av socknarna i samma kommun kan träffar från dem komma med, och lämningar i socknen som saknar kommun i registret kommer inte med.`,
 		};
 	}
 }

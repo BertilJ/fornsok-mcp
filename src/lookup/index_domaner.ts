@@ -38,19 +38,15 @@
  */
 import { BEDOMNINGAR, type DomainSource, type Domaner, type Kommun, type Socken } from "../sources/types";
 import type { D1Like, D1LikeStatement } from "../store/d1";
-import { domanerProblem } from "./domains";
+import { iBakgrunden } from "../bakgrund";
+import { domanerProblem, RELATION_MIN_ANDEL } from "./domains";
 import { lanByKod, LAN } from "./names";
 
 type Row = Record<string, unknown>;
 const str = (x: unknown): string | null => (typeof x === "string" && x.length > 0 ? x : null);
 
-/**
- * En relation socken → kommun räknas bara om minst så stor andel av socknens
- * lämningar ligger i kommunen, eller om den är socknens största kommun. Annars
- * skulle en enstaka lämning som korsar en kommun- eller länsgräns ge socknen en
- * kommun (och ett län) den inte hör till.
- */
-export const RELATION_MIN_ANDEL = 0.05;
+/** Se domains.ts. */
+export { RELATION_MIN_ANDEL };
 
 /** Kopian av appens listor hämtas på nytt när den är äldre än så här. */
 export const KOPIA_MAX_ALDER_MS = 7 * 24 * 60 * 60 * 1000;
@@ -68,8 +64,16 @@ export interface IndexDomainOptions {
 	now?: () => number;
 }
 
+/**
+ * En delad hämtning som inte avgjorts inom så här lång tid räknas som
+ * övergiven (förfrågan som startade den kan ha avbrutits), och nästa uppslag
+ * startar en ny. Appens anrop tar högst två försök à 10 s.
+ */
+export const HAMTNING_MAX_MS = 25_000;
+
 export class IndexDomainSource implements DomainSource {
 	private hamtning: Promise<Domaner | null> | null = null;
+	private hamtningStart = 0;
 
 	constructor(
 		private readonly db: D1Like,
@@ -81,10 +85,13 @@ export class IndexDomainSource implements DomainSource {
 	 * ett annat isolat redan hämtar (låset). Fel kastas (anroparen loggar).
 	 */
 	uppdateraKopia(): Promise<Domaner | null> {
-		if (this.hamtning) return this.hamtning;
+		const now = this.options.now ?? Date.now;
+		// En hämtning som hänger (löftet avgörs aldrig, t.ex. när Workers avbröt förfrågan som
+		// startade den) delas inte längre än HAMTNING_MAX_MS; sedan startas en ny.
+		if (this.hamtning && now() - this.hamtningStart < HAMTNING_MAX_MS) return this.hamtning;
+		this.hamtning = null;
 		const app = this.options.app;
 		if (!app) return Promise.resolve(null);
-		const now = this.options.now ?? Date.now;
 		const token = `${now()}|${Math.random().toString(36).slice(2)}`;
 		const p = (async () => {
 			const t = now();
@@ -106,9 +113,12 @@ export class IndexDomainSource implements DomainSource {
 			}
 		})();
 		this.hamtning = p;
+		this.hamtningStart = now();
 		void p.catch(() => {}).finally(() => {
 			if (this.hamtning === p) this.hamtning = null;
 		});
+		// Får löpa klart efter svaret: anmäls till förfrågans ctx.waitUntil (src/bakgrund.ts).
+		iBakgrunden(p);
 		return p;
 	}
 
@@ -135,6 +145,7 @@ export class IndexDomainSource implements DomainSource {
 		const kategorier = [...new Set(kat.map((r) => String(r.kategori)))].sort((a, b) => a.localeCompare(b, "sv"));
 
 		const kommunPerSocken = new Map<number, string[]>();
+		const enstakaPerSocken = new Map<number, string[]>();
 		for (const r of rel) {
 			const sid = Number(r.sid);
 			const kod = str(r.kod);
@@ -142,6 +153,7 @@ export class IndexDomainSource implements DomainSource {
 			const list = kommunPerSocken.get(sid) ?? [];
 			const andel = Number(r.antal) / Math.max(1, Number(r.totalt));
 			if (list.length === 0 || andel >= RELATION_MIN_ANDEL) list.push(kod);
+			else enstakaPerSocken.set(sid, [...(enstakaPerSocken.get(sid) ?? []), kod]);
 			kommunPerSocken.set(sid, list);
 		}
 
@@ -170,7 +182,14 @@ export class IndexDomainSource implements DomainSource {
 					}
 					// Län men inget socken-id: flera socknar med namnet i länet, hopslagna i indexet
 					// (ingest/transform.ts och src/sync/omraden.ts, sockenKod).
-					socknar.push({ id: kod ?? `omrade:${String(r.id)}`, namn, kommunkoder: koder, ...(sockenLan && !kod ? { sammanslagen: true } : {}) });
+					const enstaka = enstakaPerSocken.get(Number(r.id)) ?? [];
+					socknar.push({
+						id: kod ?? `omrade:${String(r.id)}`,
+						namn,
+						kommunkoder: koder,
+						...(sockenLan && !kod ? { sammanslagen: true } : {}),
+						...(enstaka.length ? { enstaka_kommunkoder: enstaka } : {}),
+					});
 					break;
 				}
 				case "landskap":

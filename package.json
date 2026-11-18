@@ -8,6 +8,7 @@
 		"start": "npm run dev",
 		"test": "vitest run",
 		"test:watch": "vitest",
+		"test:kontrakt": "vitest run --config vitest.kontrakt.config.mts",
 		"type-check": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json && npm run type-check:ingest",
 		"type-check:ingest": "tsc --noEmit -p ingest/tsconfig.json",
 		"ingest": "node ingest/cli.ts",

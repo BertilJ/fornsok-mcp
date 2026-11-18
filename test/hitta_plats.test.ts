@@ -85,6 +85,38 @@ const NOMINATIM_FALU_GRUVA = [
 	},
 ];
 
+/**
+ * Inspelat 2026-11-18: GET https://nominatim.openstreetmap.org/search?q=Bjurs%C3%A5s
+ * &countrycodes=se&format=jsonv2&limit=5&addressdetails=1&accept-language=sv
+ */
+const NOMINATIM_BJURSAS = [
+	{
+		place_id: 161726177,
+		licence: "Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright",
+		osm_type: "node",
+		osm_id: 320526605,
+		lat: "60.7377645",
+		lon: "15.4511052",
+		category: "place",
+		type: "village",
+		place_rank: 19,
+		importance: 0.3544115905399448,
+		addresstype: "village",
+		name: "Bjursås",
+		display_name: "Bjursås, Falu kommun, Dalarnas län, 790 21, Sverige",
+		address: {
+			village: "Bjursås",
+			municipality: "Falu kommun",
+			county: "Dalarnas län",
+			"ISO3166-2-lvl4": "SE-W",
+			postcode: "790 21",
+			country: "Sverige",
+			country_code: "se",
+		},
+		boundingbox: ["60.7177645", "60.7577645", "15.4311052", "15.4711052"],
+	},
+];
+
 class FakeKv implements KvLike {
 	data = new Map<string, { value: string; ttl?: number }>();
 	async get(key: string) {
@@ -105,8 +137,11 @@ function nominatimFetch(status = 200, body: unknown = NOMINATIM_FALU_GRUVA) {
 		calls.push({ url, ua: new Headers(init?.headers).get("user-agent") });
 		if (url.hostname !== "nominatim.openstreetmap.org")
 			return new Response("oväntat", { status: 599 });
+		// Bjursås och Falun har egna svar (inspelat respektive tomt); övriga frågor får `body`.
+		const q = url.searchParams.get("q") ?? "";
+		const svar = q === "Bjursås" ? NOMINATIM_BJURSAS : q === "Falun" ? [] : body;
 		return status === 200
-			? json(body, 200, "application/json; charset=utf-8")
+			? json(svar, 200, "application/json; charset=utf-8")
 			: json({ error: "fel" }, status);
 	};
 	return { fetch, calls };
@@ -161,26 +196,70 @@ describe("hitta_plats", () => {
 	});
 	afterEach(() => db.close());
 
-	it("socken ur indexet, utan anrop till Nominatim", async () => {
-		const r = structured(await hittaPlats({ namn: "bjursås" }, deps));
+	it("socken ur indexet, och orten ur OpenStreetMap som egen kandidat (först), med punktens sort", async () => {
+		const res = await hittaPlats({ namn: "Bjursås" }, deps);
+		const r = structured(res);
 		expect(hittaPlatsOutput.parse(r)).toBeTruthy();
-		expect(r.kalla).toBe("index");
+		expect(r.kalla).toBe("index+nominatim");
+		expect(nom.calls).toHaveLength(1);
+		expect(nom.calls[0].url.searchParams.get("q")).toBe("Bjursås");
 		expect(r.kandidater[0]).toMatchObject({
 			namn: "Bjursås",
+			typ: "place/village",
+			punkttyp: "ort",
+			punkt: "ort enligt OpenStreetMap",
+			kalla: "OpenStreetMap Nominatim",
+			lat: 60.737765,
+			lon: 15.451105,
+		});
+		expect(r.kandidater[1]).toMatchObject({
+			namn: "Bjursås",
 			typ: "socken",
+			punkttyp: "omradets_lamningar",
+			punkt: "mittpunkt för socknens registrerade lämningar",
 			kommun: "Falun",
 			lan: "Dalarna",
 			antal_lamningar: 1,
 			kalla: "Lämningsindex (D1)",
 		});
-		expect(r.kandidater[0].lat).toBeCloseTo(60.73368, 4);
-		expect(r.kandidater[0].sweref99tm.e).toBeCloseTo(524893, -1);
+		expect(r.kandidater[1].lat).toBeCloseTo(60.73368, 4);
+		expect(r.kandidater[1].sweref99tm.e).toBeCloseTo(524893, -1);
+		const t = (res.content[0] as { text: string }).text;
+		expect(t).toContain("1. «Bjursås» – ort enligt OpenStreetMap (place/village), Falu kommun, Dalarnas län: 60.73777, 15.45111.");
+		expect(t).toContain("2. «Bjursås» – mittpunkt för socknens registrerade lämningar (1 lämning) – inte orten, Falun kommun, Dalarnas län: 60.73368");
+		expect(t).toMatch(/Orten Bjursås enligt OpenStreetMap ligger [\d,]+ km från mittpunkten för socknens registrerade lämningar\. Använd ortspunkten för "nära Bjursås"/);
+		expect(t).toMatch(/^Källa: serverns lämningsindex och OpenStreetMap Nominatim; index \(datum okänt\); OpenStreetMap hämtat nu\.$/m);
+		expect(r.hamtad_fran).toBe("index (datum okänt); OpenStreetMap hämtat nu");
+	});
+
+	it("exakt namngiven lämning: bara indexet, inget anrop till Nominatim", async () => {
+		const r = structured(await hittaPlats({ namn: "Mas-källa" }, deps));
+		expect(r.kalla).toBe("index");
+		expect(r.kandidater[0]).toMatchObject({ punkttyp: "namngiven_lamning", punkt: "namngiven lämning (lämningens mittpunkt)" });
 		expect(nom.calls).toHaveLength(0);
+	});
+
+	it("socken med Nominatim avstängt eller nere: anmärkningen säger att punkten inte är orten", async () => {
+		const av = createHittaPlatsDeps({ db: openD1(db), kv, fetch: nom.fetch, nominatim: "av" });
+		const r = structured(await hittaPlats({ namn: "Bjursås" }, av));
+		expect(r.kalla).toBe("index");
+		expect(r.kandidater).toHaveLength(1);
+		expect(r.anmarkningar.join(" ")).toMatch(/avstängt.*Socknens punkt är mittpunkten för dess registrerade lämningar, inte orten/);
+		const nere = nominatimFetch(503);
+		const d = { ...createHittaPlatsDeps({ db: openD1(db), fetch: nere.fetch }), sleep: async () => {} };
+		const r2 = structured(await hittaPlats({ namn: "Bjursås" }, d));
+		expect(r2.kandidater.map((k: S) => k.punkttyp)).toEqual(["omradets_lamningar"]);
+		expect(r2.anmarkningar.join(" ")).toMatch(/gick inte att nå.*inte orten/);
 	});
 
 	it("kommun ur indexet: mittpunkt av kommunens lämningar", async () => {
 		const r = structured(await hittaPlats({ namn: "Falun" }, deps));
+		// OpenStreetMap frågas (kommunen är ett område) men har inget här (tomt svar).
+		expect(nom.calls).toHaveLength(1);
+		expect(r.kalla).toBe("index");
 		expect(r.kandidater[0]).toMatchObject({
+			punkttyp: "omradets_lamningar",
+			punkt: "mittpunkt för kommunens registrerade lämningar",
 			namn: "Falun",
 			typ: "kommun",
 			antal_lamningar: 2,
@@ -203,11 +282,11 @@ describe("hitta_plats", () => {
 	it("kommun- och länsfilter", async () => {
 		expect(
 			structured(await hittaPlats({ namn: "Bjursås", lan: "Dalarnas län" }, deps)).kalla,
-		).toBe("index");
+		).toBe("index+nominatim");
 		// Bjursås ligger inte i Jämtland: inget i indexet → Nominatim.
 		const r = structured(await hittaPlats({ namn: "Bjursås", lan: "Jämtland" }, deps));
 		expect(r.kalla).toBe("nominatim");
-		expect(nom.calls[0].url.searchParams.get("q")).toBe("Bjursås, Jämtlands län");
+		expect(nom.calls[1].url.searchParams.get("q")).toBe("Bjursås, Jämtlands län");
 		await expect(hittaPlats({ namn: "Bjursås", lan: "Atlantis" }, deps)).rejects.toThrow(
 			/Okänt län/,
 		);
@@ -354,7 +433,7 @@ describe("hitta_plats", () => {
 				name: "hitta_plats",
 				arguments: { namn: "Bjursås" },
 			});
-			expect((res.structuredContent as S).kandidater[0].namn).toBe("Bjursås");
+			expect((res.structuredContent as S).kandidater.map((k: S) => k.namn)).toEqual(["Bjursås", "Bjursås"]);
 		} finally {
 			await client.close();
 		}

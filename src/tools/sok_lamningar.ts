@@ -11,7 +11,7 @@ import { reservHamtadFran } from "../store/access";
 import { type IndexHit, MAX_RANKAD } from "../store/index";
 import { MAX_TERMS, tokenize } from "../store/fts";
 import { TRAFF_SLUT, TRAFF_START } from "../extern_text";
-import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, citat, fmtCoord, list, ok, rad, runTool, EXTERN_TEXT } from "./common";
+import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, citat, fmtCoord, list, ok, rad, runTool, EXTERN_TEXT, kallrad } from "./common";
 import { type ResolvedFilter, describeFilter, filterShape, hasCriteria, resolveEgenskaper, resolveFilter, toKsamsokFilter } from "./filter";
 import { makeUtdrag } from "./utdrag";
 import { type OpenIndex, viaIndex } from "./via_index";
@@ -524,10 +524,10 @@ function respond(args: SokArgs, s: Svar) {
 		lines.push("Inga träffar i registret med de här villkoren.");
 		lines.push(`Villkor: ${describeFilter(filter)}`);
 		if (forslag.length) lines.push(`Pröva: ${forslag.join(" ")}`);
-		lines.push(`Källa: ${s.kalla}; ${s.hamtad_fran}.`);
+		lines.push(kallrad(s.kalla, s.hamtad_fran));
 	} else {
 		lines.push(
-			`${s.totalt_ungefar ? "Cirka " : ""}${s.totalt} träffar${traffar.length ? `, visar ${sidStart}–${sidStart + traffar.length - 1}` : ""} (sida ${args.sida}, ${kanaler}). Källa: ${s.kalla}; ${s.hamtad_fran}.`,
+			`${s.totalt_ungefar ? "Cirka " : ""}${s.totalt} träffar${traffar.length ? `, visar ${sidStart}–${sidStart + traffar.length - 1}` : ""} (sida ${args.sida}, ${kanaler}). ${kallrad(s.kalla, s.hamtad_fran)}`,
 		);
 		traffar.forEach((t, i) => {
 			const id = [rad(t.lamningsnummer), t.raa_nummer ? `(${rad(t.raa_nummer)})` : null].filter(Boolean).join(" ");
@@ -547,6 +547,6 @@ function respond(args: SokArgs, s: Svar) {
 			}
 		});
 	}
-	for (const a of anmarkningar) lines.push(`Obs: ${a}`);
+	for (const a of anmarkningar) lines.push(`Obs: ${rad(a)}`);
 	return ok(lines.join("\n"), structured);
 }

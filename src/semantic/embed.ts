@@ -41,15 +41,38 @@ export const MAX_FEL_PER_POST = 3;
 export const MAX_AI_FEL_PER_KORNING = 12;
 
 /**
- * Tillfälligt fel i Workers AI (överbelastning, 5xx, 429, kvot, tidsgräns,
- * nätverk) – inte fel på texten. Förbrukar inga försök i inbaddning_fel, och
- * delen halveras inte (alla texter skulle falla av samma skäl).
+ * Felkoder i Workers AI som betyder att tjänsten (inte texten) är problemet
+ * (developers.cloudflare.com/workers-ai/platform/errors/, läst 2026-11-18):
+ * 3007 Timeout (408), 3008 Aborted (408), 3036 dagskvoten slut (429),
+ * 3040 Out of capacity (429). Övriga koder (t.ex. 3006 Request too large,
+ * 5004 Invalid data) gäller anropet eller texten.
+ */
+export const TILLFALLIGA_AI_KODER = new Set(["3007", "3008", "3036", "3040"]);
+/** HTTP-statusar med standardfras, så som de står i felmeddelanden ("502 Bad Gateway"). */
+const HTTP_FRAS = /(?:^|[\s:(])(429 Too Many Requests|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Time-?out)(?:$|[\s.,;)])/i;
+/** Workers AI:s felkod först i meddelandet eller efter feltypen: "3040: …", "AiError: 3040: …". */
+const AI_KOD = /(?:^|:\s*)(\d{4})\s*:/;
+
+/**
+ * Tillfälligt fel i Workers AI – inte fel på texten. Förbrukar inga försök i
+ * inbaddning_fel, och delen halveras inte (alla texter skulle falla av samma
+ * skäl). Avgörs bara på HTTP-status (fältet `status`, eller status med
+ * standardfras i meddelandet), kända felkoder (TILLFALLIGA_AI_KODER) och kända
+ * feltyper (TimeoutError, AbortError, Workers "Network connection lost.").
+ * Allt annat – även okända fel – räknas som fel på texten, så att halveringen
+ * kan isolera en text som modellen avvisar (granskningen av b327106, punkt 2:
+ * "Input text exceeds 512 tokens" och "got 500 characters" matchade tidigare
+ * det breda mönstret och blev aldrig isolerade).
  */
 export function arTillfalligtAiFel(e: unknown): boolean {
 	const st = (e as { status?: unknown } | null)?.status;
-	if (typeof st === "number") return st === 429 || st >= 500;
-	const msg = e instanceof Error ? `${e.name} ${e.message}` : String(e);
-	return /\b(429|5\d\d)\b|time ?out|timed out|temporar|capacity|overload|rate.?limit|too many requests|quota|allocation|unavailable|upstream|network|fetch failed|ECONNRESET|internal (server )?error/i.test(msg);
+	if (typeof st === "number") return st === 429 || st === 408 || st >= 500;
+	if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) return true;
+	const msg = e instanceof Error ? e.message : String(e);
+	const kod = AI_KOD.exec(msg)?.[1];
+	if (kod) return TILLFALLIGA_AI_KODER.has(kod);
+	if (/^Network connection lost\.?$/i.test(msg.trim())) return true;
+	return HTTP_FRAS.test(msg);
 }
 
 export interface EmbedResult {

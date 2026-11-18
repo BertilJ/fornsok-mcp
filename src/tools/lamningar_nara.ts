@@ -7,7 +7,7 @@ import { bboxAround, compassDirection, type Geometry, nearestPoint, wgsToSweref 
 import { isInSweden, type Planar, round, toLatLon, toPlanar } from "../geo/sweref";
 import { BEDOMNINGAR, type NearbyFeature, type NearbyPage } from "../sources/types";
 import { reservHamtadFran } from "../store/access";
-import { READ_ONLY, type ToolDeps, ok, runTool, citat, rad, EXTERN_TEXT } from "./common";
+import { READ_ONLY, type ToolDeps, ok, runTool, citat, rad, EXTERN_TEXT, kallrad } from "./common";
 import { type OpenIndex, viaIndex } from "./via_index";
 
 /** Högst så många geometrier hämtas per anrop till OGC API. */
@@ -345,10 +345,10 @@ function respondNara(q: NaraQuery, s: NaraSvar) {
 	if (totalt === 0) {
 		lines.push(`Inga lämningar ${omrade} från ${center.lat.toFixed(5)}, ${center.lon.toFixed(5)}${filterText(args, lamningstyp)}.`);
 		lines.push("Pröva större radie eller färre filter.");
-		lines.push(`Källa: ${s.kalla}; ${s.hamtad_fran}.`);
+		lines.push(kallrad(s.kalla, s.hamtad_fran));
 	} else {
 		lines.push(
-			`${totalt} lämningar ${omrade} från ${center.lat.toFixed(5)}, ${center.lon.toFixed(5)}${filterText(args, lamningstyp)}; visar ${items.length}, närmast först. Källa: ${s.kalla}; ${s.hamtad_fran}.`,
+			`${totalt} lämningar ${omrade} från ${center.lat.toFixed(5)}, ${center.lon.toFixed(5)}${filterText(args, lamningstyp)}; visar ${items.length}, närmast först. ${kallrad(s.kalla, s.hamtad_fran)}`,
 		);
 		items.forEach((it, i) => {
 			const lage = it.inom_lamningen
@@ -364,7 +364,7 @@ function respondNara(q: NaraQuery, s: NaraSvar) {
 			);
 		});
 	}
-	for (const a of anmarkningar) lines.push(`Obs: ${a}`);
+	for (const a of anmarkningar) lines.push(`Obs: ${rad(a)}`);
 	return ok(lines.join("\n"), structured);
 }
 

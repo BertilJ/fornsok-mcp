@@ -2,12 +2,14 @@
  * Kontrakt: K-samsök (officiellt, CC0). Frågeformerna är servernas egna
  * (src/sources/ksamsok/query.ts): `serviceName=kmr_lamningar`, `itemNumber`,
  * `boundingBox`, fältsvar (`recordSchema=xml` + `fields`) och presentationssvar,
- * samt en post som JSON-LD. Svaren tolkas med projektets egna tolkare.
+ * samt en post som JSON-LD, och relaterat material (getRelations, relUri och
+ * itemId). Svaren tolkas med projektets egna tolkare.
  */
 import { describe, it } from "vitest";
 import { KSAMSOK_LAMNING_HTTPS } from "../../src/config";
 import { asArray, mergeHit, parseFieldsRecord, parseJsonLd, parsePresentationRecord, parseSearchResponse, uuidFromUri } from "../../src/sources/ksamsok/parse";
 import { buildQuery, buildSearchUrl, SEARCH_FIELDS } from "../../src/sources/ksamsok/query";
+import { FMI_URI_RE, KSAMSOK_OBJEKT_URI_RE, objektUrl, parsePresObjekt, parseRelations, relationsUrl, relUriUrl } from "../../src/sources/ksamsok/relations";
 import { en, hamta, jsonSvar, Kontroll, skapaKlient, TESTNUMMER, TESTPOSTER, tolka } from "./stod";
 
 const KALLA = "ksamsok" as const;
@@ -169,4 +171,80 @@ describe("K-samsök: post som JSON-LD", () => {
 			k.klar();
 		});
 	}
+});
+
+// ------------------------------------------------------------------ relaterat material (verktyget relaterat)
+
+/**
+ * getRelations, relUri-sökningen och objektuppslaget (itemId) som
+ * src/sources/ksamsok/relations.ts gör, med serverns egna adresser och tolkare.
+ * Tre anrop. L2000:8802 ersätter sex äldre FMI-poster och har inventeringsboks-
+ * uppslag (isDescribedBy); Rökstenen (Rök 1:1) har foton med medielicens.
+ */
+const REL = "getRelations (relation=all, raa/lamning/{uuid})";
+const RELURI = "search relUri=lämning OR relUri=FMI-poster (recordSchema=presentation)";
+const ITEMID = "search itemId=… OR itemId=… (recordSchema=presentation)";
+const ROK_FOTO = "http://kulturarvsdata.se/raa/dokumentation/d86763c2-e93a-4d70-b8ff-a239fdc1fe01";
+const ROK_DOK = "http://kulturarvsdata.se/raa/dokumentation/b10bef50-ef93-4078-a507-2234926693a6";
+
+const relationer = en(async () => {
+	const res = await hamta(KALLA, REL, () => klient.get(relationsUrl(TESTPOSTER["L2000:8802"].uuid)));
+	return tolka(KALLA, REL, "result.relations.relation", () => parseRelations(res));
+});
+
+describe("K-samsök: relaterat material", () => {
+	it("getRelations: äldre FMI-poster (replaces) och härledda relationer (isDescribedBy, source=deduced)", async () => {
+		const rel = await relationer();
+		const k = new Kontroll(KALLA, REL);
+		k.krav(rel.length >= 2, "result.relations.relation", `väntade minst 2 relationer, fick ${rel.length}`);
+		const fmi = rel.filter((r) => r.typ === "replaces");
+		k.krav(fmi.length >= 1, "relation[type=replaces]", "ingen relation till en äldre FMI-post");
+		k.krav(fmi.every((r) => FMI_URI_RE.test(r.uri)), "relation[type=replaces].content", `väntade http://kulturarvsdata.se/raa/fmi/{id}, fick ${JSON.stringify(fmi.map((r) => r.uri).slice(0, 3))}`);
+		const besk = rel.filter((r) => r.typ === "isDescribedBy");
+		k.krav(besk.length >= 1, "relation[type=isDescribedBy]", "ingen isDescribedBy (inventeringsboksuppslag)");
+		k.krav(besk.every((r) => r.harledd), "relation[type=isDescribedBy].source", 'väntade source="deduced" (relationen står hos dokumentet)');
+		k.krav(besk.every((r) => KSAMSOK_OBJEKT_URI_RE.test(r.uri)), "relation.content", "objektets URI har oväntad form");
+		k.klar();
+	});
+
+	it("relUri-sökning: objekten med de presentationsfält koden läser", async () => {
+		const rel = await relationer();
+		const fmi = rel.filter((r) => r.typ === "replaces").map((r) => r.uri);
+		const egen = `http://kulturarvsdata.se/raa/lamning/${TESTPOSTER["L2000:8802"].uuid}`;
+		const res = await hamta(KALLA, RELURI, () => klient.get(relUriUrl([egen, ...fmi])));
+		const parsad = tolka(KALLA, RELURI, "svarsform (result.totalHits, result.records.record)", () => parseSearchResponse(res));
+		const objekt = parsad.records.map((r) => parsePresObjekt(r)).filter((o) => o !== null);
+		const k = new Kontroll(KALLA, RELURI);
+		k.krav(objekt.length === parsad.records.length, "pres:item.pres:entityUri", "poster utan pres:entityUri");
+		const dok = objekt.filter((o) => o.uri !== egen);
+		k.krav(dok.length >= 1, "result.records.record", "inga objekt med relation till lämningen eller FMI-posterna");
+		for (const o of dok) {
+			k.krav(!!o.typ, `${o.uri}.pres:type`, "saknas");
+			k.krav(!!o.tjanst, `${o.uri}.pres:service`, "saknas");
+			k.krav(!!o.titel, `${o.uri}.pres:itemLabel`, "saknas");
+			k.krav(!!o.institution, `${o.uri}.pres:organization`, "saknas");
+			k.krav(!!o.url, `${o.uri}.pres:representations[format=HTML]`, "ingen HTML-representation (länken till objektets sida)");
+		}
+		k.krav(dok.some((o) => o.tjanst === "arkiv-dokument"), "pres:service", `väntade minst ett inventeringsboksuppslag (arkiv-dokument), fick ${JSON.stringify([...new Set(dok.map((o) => o.tjanst))])}`);
+		k.klar();
+	});
+
+	it("objektuppslag med itemId: foto med bildlänkar och medielicens, dokument utan", async () => {
+		const res = await hamta(KALLA, ITEMID, () => klient.get(objektUrl([ROK_FOTO, ROK_DOK])));
+		const parsad = tolka(KALLA, ITEMID, "svarsform (result.totalHits, result.records.record)", () => parseSearchResponse(res));
+		const objekt = new Map(parsad.records.map((r) => parsePresObjekt(r)).filter((o) => o !== null).map((o) => [o.uri, o]));
+		const k = new Kontroll(KALLA, ITEMID);
+		k.krav(objekt.size === 2, "result.records.record", `väntade 2 objekt, fick ${objekt.size}`);
+		const foto = objekt.get(ROK_FOTO);
+		k.krav(foto?.typ === "Foto" && foto?.tjanst === "arkiv-bilder", `${ROK_FOTO}.pres:type/pres:service`, `väntade Foto/arkiv-bilder, fick ${foto?.typ}/${foto?.tjanst}`);
+		const b = foto?.bilder[0];
+		k.krav(!!b, `${ROK_FOTO}.pres:image`, "saknas");
+		k.krav(!!b?.miniatyr && !!b?.stor, `${ROK_FOTO}.pres:image.pres:src[type=thumbnail|highres]`, "bildlänkar saknas");
+		k.krav(!!b?.licens && /^http:\/\/kulturarvsdata\.se\/resurser\/license#/.test(b.licens), `${ROK_FOTO}.pres:image.pres:mediaLicense`, `väntade en licens-URI, fick ${JSON.stringify(b?.licens)}`);
+		k.krav(!!b?.licens_url, `${ROK_FOTO}.pres:image.pres:mediaLicenseUrl`, "saknas");
+		k.krav(b?.upphovsratt !== null && b?.upphovsratt !== undefined, `${ROK_FOTO}.pres:image.pres:copyright`, "saknas");
+		const dok = objekt.get(ROK_DOK);
+		k.krav(dok?.tjanst === "arkiv-dokument", `${ROK_DOK}.pres:service`, `väntade arkiv-dokument, fick ${dok?.tjanst}`);
+		k.klar();
+	});
 });

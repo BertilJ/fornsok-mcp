@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ToolInputError } from "../src/errors";
-import { DomainService } from "../src/lookup/domains";
+import { DomainService, domanerProblem } from "../src/lookup/domains";
 import { findLan, levenshtein, suggest } from "../src/lookup/names";
 import { parseDomaner } from "../src/sources/fornsokapp/parse";
 import type { Domaner } from "../src/sources/types";
@@ -105,6 +105,58 @@ describe("namnuppslag mot värdelistorna", () => {
 		const [c] = await svc.resolveSocknar(["Näs"], { lan: ["Gotland"] });
 		expect(c.lan).toEqual(["Gotland"]);
 		await expect(svc.resolveSocknar(["Näs (Skåne)"])).rejects.toThrow(/Kandidater/);
+	});
+
+	it("flertydig socken: förslaget skiljer verkligen kandidaterna åt (kommun när länet inte räcker)", async () => {
+		const { svc } = service();
+		// Ägarens fall: socken Mo med län Västra Götaland. Tre Mo ligger i länet; länet skiljer dem inte åt.
+		const err = (await svc.resolveSocknar(["Mo"], { lan: ["Västra Götaland"] }).catch((e) => e)) as ToolInputError;
+		expect(err).toBeInstanceOf(ToolInputError);
+		expect(err.message).toMatch(/3 socknar heter så/);
+		expect(err.message).not.toMatch(/"Mo \(Västra Götaland\)"/);
+		expect(err.message).toMatch(/Ange en kvalificerare som skiljer dem åt: "Mo \(Tanum\)", "Mo \(Åmål\)", "Mo \(Skövde\)"\./);
+		// Varje förslag ger exakt en socken.
+		for (const f of (err.details?.forslag as string[]) ?? []) {
+			const [r] = await svc.resolveSocknar([f], { lan: ["Västra Götaland"] });
+			expect(r.namn).toBe("Mo");
+		}
+		// Utan län: Mo i Gävleborg och Västernorrland pekas ut med länet, de andra med kommun.
+		const alla = (await svc.resolveSocknar(["Mo"]).catch((e) => e)) as ToolInputError;
+		expect(alla.details?.forslag).toEqual(["Mo (Tanum)", "Mo (Åmål)", "Mo (Skövde)", "Mo (Gävleborg)", "Mo (Västernorrland)"]);
+	});
+
+	it("kommun där socknen bara har enstaka lämningar (indexets listor, under 5 %): begripligt fel, inte bara 'Ingen socken'", async () => {
+		const d = await service().svc.get();
+		const munkedal = d.kommuner.find((k) => k.namn === "Munkedal")!;
+		const tanum = d.kommuner.find((k) => k.namn === "Tanum")!;
+		const amal = d.kommuner.find((k) => k.namn === "Åmål")!;
+		const lista: Domaner = {
+			...d,
+			socknar: [
+				{ id: "omrade:1", namn: "Mo", kommunkoder: [tanum.kod, amal.kod], sammanslagen: true, enstaka_kommunkoder: [munkedal.kod] },
+				{ id: "c0e16ce1-a20b-40d3-853d-b784212f55ce", namn: "Mo", kommunkoder: ["2182"] },
+				{ id: "x", namn: "Bjursås", kommunkoder: ["2080"], enstaka_kommunkoder: ["2026"] },
+			],
+		};
+		const svc = new DomainService({ loadDomaner: async () => lista });
+		const err = (await svc.resolveSocknar(["Mo (Munkedal)"]).catch((e) => e)) as ToolInputError;
+		expect(err.message).toMatch(/^Ingen socken "Mo" i kommunen Munkedal enligt serverns index: Mo \(Västra Götaland: Tanum, Åmål\) har bara enstaka lämningar i Munkedal \(under 5 % av socknens\)/);
+		expect(err.message).toMatch(/sök med kommun Munkedal utan socken/);
+		const gagnef = d.kommuner.find((k) => k.kod === "2026")?.namn ?? "Gagnef";
+		const err2 = (await svc.resolveSocknar([`Bjursås (${gagnef})`]).catch((e) => e)) as ToolInputError;
+		expect(err2.message).toMatch(/bara enstaka lämningar i socknen/);
+	});
+
+	it("domanerProblem kontrollerar även län, kategorier, bedömningar, socknarnas form och hämtningsdatum", () => {
+		const d = parseDomaner(fixture("app-lamning-domaner.json"), fixture("app-uppdrag-domaner.json"));
+		expect(domanerProblem(d)).toBeNull();
+		expect(domanerProblem({ ...d, lan: undefined } as unknown as Domaner)).toMatch(/listor saknas: lan/);
+		expect(domanerProblem({ ...d, kategorier: "x" } as unknown as Domaner)).toMatch(/kategorier/);
+		expect(domanerProblem({ ...d, bedomningar: null } as unknown as Domaner)).toMatch(/bedomningar/);
+		expect(domanerProblem({ ...d, hamtad: "igår" })).toMatch(/hämtningsdatum/);
+		expect(domanerProblem({ ...d, hamtad: undefined } as unknown as Domaner)).toMatch(/hämtningsdatum/);
+		expect(domanerProblem({ ...d, socknar: [{ id: "x", namn: "", kommunkoder: [] }] })).toMatch(/socknar/);
+		expect(domanerProblem({ ...d, lan: [{ kod: "20", namn: "" }] })).toMatch(/län utan namn/);
 	});
 
 	it("okänd socken ger förslag", async () => {

@@ -4,10 +4,11 @@ import { strikt } from "./schema";
 import { SOURCE_NAMES, ToolInputError, UpstreamError } from "../errors";
 import { type Geometry, simplifyToLimit, swerefToWgs, wgsToSweref, countPositions } from "../geo/geometry";
 import { type ParsedId, parseId } from "../ids";
-import type { LamningPost, RecordFetchResult, Referenser, Version } from "../sources/types";
+import type { LamningPost, RecordFetchResult, Referenser, RelateratSammanfattning, Version } from "../sources/types";
 import { IndexInputError } from "../store/d1";
-import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, citat, citatStycken, fmtCoord, list, ok, rad, runTool, EXTERN_TEXT } from "./common";
+import { BOILERPLATE_RE, READ_ONLY, type ToolDeps, citat, citatStycken, fmtCoord, kallrad, list, ok, rad, runTool, EXTERN_TEXT } from "./common";
 import { type DokumentPost, dokumentPost, formatDokumentRad, toDokumentPost } from "./dokument";
+import { formatSammanfattning, relateratSammanfattning, sammanfatta } from "./relaterat";
 import type { OpenIndex } from "./via_index";
 
 export const MAX_GEOMETRY_POSITIONS = 500;
@@ -15,9 +16,6 @@ export const MAX_GEOMETRY_POSITIONS = 500;
 export const MAX_IDS = 10;
 
 const INKLUDERA = ["geometri", "referenser", "dokument", "historik", "relaterat"] as const;
-const SENARE: Record<string, string> = {
-	relaterat: "Relaterat material (foton, arkivhandlingar, föremål) finns inte än – kommer senare.",
-};
 
 export const lamningInput = strikt("lamning", {
 	id: z
@@ -29,7 +27,7 @@ export const lamningInput = strikt("lamning", {
 		.array(z.enum(INKLUDERA))
 		.optional()
 		.describe(
-			"Extra delar: geometri (GeoJSON i WGS 84, förenklad över 500 brytpunkter), referenser (skriftliga källor, kartor, uppgiftslämnare), dokument (med dokument_ref till hamta_dokument) och historik (versioner). Referenser, dokument och historik hämtas från Fornsök-appen. relaterat kommer senare.",
+			"Extra delar: geometri (GeoJSON i WGS 84, förenklad över 500 brytpunkter), referenser (skriftliga källor, kartor, uppgiftslämnare), dokument (med dokument_ref till hamta_dokument), historik (versioner) och relaterat (sammanfattning av foton, arkivhandlingar och föremål i K-samsök; hela listan med verktyget relaterat). Referenser, dokument och historik hämtas från Fornsök-appen, relaterat från K-samsök.",
 		),
 });
 
@@ -101,6 +99,7 @@ const lamningSchema = z.object({
 			}),
 		)
 		.optional(),
+	relaterat: relateratSammanfattning.optional(),
 });
 
 export const lamningOutput = z.object({
@@ -122,7 +121,7 @@ export function registerLamning(server: McpServer, deps: ToolDeps): void {
 				"Hela posten för 1–10 lämningar ur Kulturmiljöregistret: identiteter, typ, antikvarisk bedömning med motivering, beskrivning, " +
 				"tradition, terräng, orientering, egenskaper, ingående lämningar, statusar, indelning, mittpunkt och lägesosäkerhet. " +
 				"Tar lämningsnummer, RAÄ-nummer (äldre litteratur; ett nummer som delas av flera lämningar ger alla), UUID eller K-samsök-URI. Grundposten kommer ur serverns eget index; saknas den där, eller är indexet otillgängligt, hämtas den från Fornsök-appen med K-samsök som reserv. " +
-				"`inkludera` lägger till geometri, referenser, dokument (med dokument_ref till hamta_dokument) och versionshistorik." + EXTERN_TEXT,
+				"`inkludera` lägger till geometri, referenser, dokument (med dokument_ref till hamta_dokument), versionshistorik och en sammanfattning av relaterat material i K-samsök (verktyget relaterat ger hela listan)." + EXTERN_TEXT,
 			inputSchema: lamningInput,
 			outputSchema: lamningOutput,
 			annotations: { ...READ_ONLY, title: "Hämta lämning" },
@@ -134,7 +133,6 @@ export function registerLamning(server: McpServer, deps: ToolDeps): void {
 export async function hamtaLamningar(args: LamningArgs, deps: ToolDeps) {
 	const inkludera = new Set(args.inkludera ?? []);
 	const anmarkningar: string[] = [];
-	for (const key of ["relaterat"]) if (inkludera.has(key as (typeof INKLUDERA)[number])) anmarkningar.push(SENARE[key]);
 
 	const ej_hittade: Array<{ id: string; orsak: string }> = [];
 	const parsed: ParsedId[] = [];
@@ -256,6 +254,7 @@ export async function hamtaLamningar(args: LamningArgs, deps: ToolDeps) {
 		}
 		if (extra?.dokument) post.dokument = extra.dokument;
 		if (extra?.historik) post.historik = extra.historik;
+		if (extra?.relaterat) post.relaterat = extra.relaterat;
 		for (const n of extra?.notes ?? []) anmarkningar.push(`${post.lamningsnummer ?? post.uuid}: ${n}`);
 		lamningar.push(post);
 	});
@@ -268,7 +267,7 @@ export async function hamtaLamningar(args: LamningArgs, deps: ToolDeps) {
 	const lines: string[] = [];
 	for (const l of lamningar) lines.push(formatPost(l));
 	for (const e of ej_hittade) lines.push(`Ej hittad: ${e.id} – ${e.orsak}`);
-	for (const a of anmarkningar) lines.push(`Obs: ${a}`);
+	for (const a of anmarkningar) lines.push(`Obs: ${rad(a)}`);
 	return ok(lines.join("\n\n"), structured);
 }
 
@@ -312,9 +311,9 @@ async function fetchExtras(
 	inkludera: Set<string>,
 	deps: ToolDeps,
 	referenserLive: boolean,
-): Promise<{ referenser?: Referenser; dokument?: DokumentPost[]; historik?: Version[]; notes: string[] }> {
+): Promise<{ referenser?: Referenser; dokument?: DokumentPost[]; historik?: Version[]; relaterat?: RelateratSammanfattning; notes: string[] }> {
 	const notes: string[] = [];
-	const out: { referenser?: Referenser; dokument?: DokumentPost[]; historik?: Version[]; notes: string[] } = { notes };
+	const out: { referenser?: Referenser; dokument?: DokumentPost[]; historik?: Version[]; relaterat?: RelateratSammanfattning; notes: string[] } = { notes };
 	const why = (err: unknown) => (err instanceof UpstreamError ? err.message : "oväntat fel");
 	await Promise.all([
 		// Referenser finns inte i indexet (GeoPackage-filen saknar dem): hämtas från de levande postkällorna.
@@ -345,6 +344,18 @@ async function fetchExtras(
 					.catch((err) => {
 						if (!(err instanceof UpstreamError)) console.error("historik:", err);
 						notes.push(`historik kunde inte hämtas (${why(err)}).`);
+					})
+			: null,
+		// Relaterat material från K-samsök. Ett fel där fäller inte posten (SPEC 8).
+		inkludera.has("relaterat")
+			? deps.relations
+					.hamtaRelaterat(uuid)
+					.then((l) => {
+						out.relaterat = sammanfatta(l);
+					})
+					.catch((err) => {
+						if (!(err instanceof UpstreamError)) console.error("relaterat:", err);
+						notes.push(`relaterat material kunde inte hämtas från K-samsök (${why(err)}); försök igen senare, eller med verktyget relaterat.`);
 					})
 			: null,
 	]);
@@ -434,7 +445,8 @@ export function formatPost(l: LamningPost): string {
 		lines.push(`Versionshistorik (${l.historik.length === 1 ? "1 publicerad version" : `${l.historik.length} publicerade versioner, nyast först`}):`);
 		for (const v of l.historik) lines.push(formatVersion(v));
 	}
-	lines.push(`Källa: ${l.kalla}; hämtad från ${l.hamtad_fran}.`);
+	if (l.relaterat) lines.push(...formatSammanfattning(l.relaterat, l.lamningsnummer ?? l.uuid));
+	lines.push(kallrad(l.kalla, `hämtad från ${l.hamtad_fran}`));
 	return lines.join("\n");
 }
 

@@ -156,6 +156,8 @@ export interface LamningPost {
 	dokument?: DokumentPost[];
 	/** Versionshistorik, nyast först (bara när den efterfrågats). */
 	historik?: Version[];
+	/** Sammanfattning av relaterat material i K-samsök (bara när det efterfrågats). */
+	relaterat?: RelateratSammanfattning;
 }
 
 export interface RecordFetchResult {
@@ -236,6 +238,12 @@ export interface Socken {
 	 * Namnuppslaget kräver då en kommun och avgränsar på den.
 	 */
 	sammanslagen?: boolean;
+	/**
+	 * Bara i listor byggda ur indexet: kommuner där socknen har enstaka
+	 * lämningar (under RELATION_MIN_ANDEL), som därför inte räknas som socknens.
+	 * Används bara för att förklara varför en sådan kvalificerare inte ger träff.
+	 */
+	enstaka_kommunkoder?: string[];
 }
 export interface Landskap {
 	kod: string;
@@ -389,4 +397,87 @@ export interface SemanticSearch {
 	readonly omfang?: string;
 	/** Länen i omfånget (indexets kortnamn), för att visa hur mycket som är inbäddat. */
 	readonly lan?: string[];
+}
+
+// ---------------------------------------------------------------- relaterat material (K-samsök)
+
+/** Slag av relaterat material, i den ordning de visas. */
+export const RELATERAT_SLAG = ["foto", "arkivhandling", "föremål", "dokumentation", "äldre post", "övrigt"] as const;
+export type RelateratSlag = (typeof RELATERAT_SLAG)[number];
+
+/** Rättighetsuppgifter för en bild, ordagrant ur K-samsök (pres:image). */
+export interface RelateratBild {
+	miniatyr: string | null;
+	stor: string | null;
+	/** pres:mediaLicense, t.ex. "http://kulturarvsdata.se/resurser/license#by". */
+	licens: string | null;
+	/** pres:mediaLicenseUrl, t.ex. "https://creativecommons.org/licenses/by/4.0/". */
+	licens_url: string | null;
+	/** pres:copyright */
+	upphovsratt: string | null;
+	/** pres:byline (fotograf eller upphovsperson enligt K-samsök) */
+	byline: string | null;
+	/** pres:motive */
+	motiv: string | null;
+}
+
+/** Ett objekt som K-samsök knyter till lämningen (eller till en äldre FMI-post som lämningen ersätter). */
+export interface RelateratObjekt {
+	slag: RelateratSlag;
+	/** Relationstypen enligt getRelations (t.ex. isVisualizedBy), eller null när den inte är känd. */
+	relationstyp: string | null;
+	/** true när relationen står hos det andra objektet (getRelations: source="deduced"). */
+	harledd: boolean | null;
+	/** Vad objektet är kopplat till: lämningen, eller URI:n för en äldre FMI-post som lämningen ersätter. */
+	kopplad_till: string;
+	uri: string;
+	/** pres:type, t.ex. "Foto", "Ritning", "Dokument" */
+	typ: string | null;
+	titel: string | null;
+	beskrivning: string | null;
+	institution: string | null;
+	/** pres:service, t.ex. "arkiv-bilder" */
+	tjanst: string | null;
+	/** pres:timeLabel ordagrant */
+	tid: string | null;
+	/** Årtal ur tid, t.ex. "1933" eller "1930–1933". */
+	artal: string | null;
+	/** pres:nameLabel (person knuten till objektet, t.ex. fotograf) */
+	person: string | null;
+	/** Objektets sida (HTML-representationen), om den finns. */
+	url: string | null;
+	bilder: RelateratBild[];
+	/** false när K-samsök inte hade några uppgifter om objektet (bara relationen är känd). */
+	uppgifter: boolean;
+}
+
+export interface RelateratLista {
+	uuid: string;
+	/** Lämningsnumret om K-samsök gav det (lämningen själv kommer med när den ersätter en FMI-post). */
+	lamningsnummer: string | null;
+	objekt: RelateratObjekt[];
+	/** Antal relationer enligt getRelations (för lämningen själv). */
+	relationer: number;
+	/** true när K-samsök hade fler objekt än som hämtades. */
+	ofullstandig: boolean;
+	/** När listan hämtades från K-samsök (ISO 8601). */
+	hamtad: string;
+	/** true när en del av hämtningen misslyckades (listan cachas då inte). */
+	delvis_fel: boolean;
+	anmarkningar: string[];
+}
+
+export interface RelationSource {
+	/** Relaterat material för en lämning. Kastar UpstreamError om K-samsök inte svarar. */
+	hamtaRelaterat(uuid: string): Promise<RelateratLista>;
+}
+
+/** Sammanfattningen i `lamning` med `inkludera: ["relaterat"]`. */
+export interface RelateratSammanfattning {
+	totalt: number;
+	antal_per_slag: Record<string, number>;
+	forsta: RelateratObjekt[];
+	ofullstandig: boolean;
+	kalla: string;
+	hamtad_fran: string;
 }

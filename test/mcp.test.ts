@@ -37,9 +37,9 @@ describe("MCP-servern med inspelade svar", () => {
 		await client?.close();
 	});
 
-	it("listar åtta verktyg i fast ordning med scheman och annotationer", async () => {
+	it("listar nio verktyg i fast ordning med scheman och annotationer", async () => {
 		const { tools } = await client.listTools();
-		expect(tools.map((t) => t.name)).toEqual(["sok_lamningar", "lamningar_nara", "lamning", "lamning_dokument", "hamta_dokument", "statistik", "uppslag", "hitta_plats"]);
+		expect(tools.map((t) => t.name)).toEqual(["sok_lamningar", "lamningar_nara", "lamning", "lamning_dokument", "hamta_dokument", "relaterat", "statistik", "uppslag", "hitta_plats"]);
 		for (const t of tools) {
 			expect(t.description).toBeTruthy();
 			expect(t.outputSchema).toBeTruthy();

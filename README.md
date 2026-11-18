@@ -2,7 +2,7 @@
 
 En MCP-server (Model Context Protocol) som ger läsåtkomst till Riksantikvarieämbetets kulturmiljöregister – det som visas i Fornsök: fornlämningar och andra kulturhistoriska lämningar i Sverige. Servern är skriven i TypeScript för Cloudflare Workers och är tillståndslös: en enda ändpunkt, `/mcp`, över Streamable HTTP.
 
-Projektet är under uppbyggnad (etapp 4–6). Sökning, närhetssök, statistik och grundposten går mot ett eget index över hela registret i Cloudflare D1, laddat från RAÄ:s GeoPackage-uttag och uppdaterat nattligen via RAÄ:s ändringsflöde. Inom ett semantiskt omfång (Dalarnas län) kan sökningen också gå på frågans innebörd (Vectorize och Workers AI). Saknas indexet, är det tomt eller fallerar ett indexanrop, används RAÄ:s levande källor (reservläge). Inventeringsböcker, dokument och historik hämtas alltid från de levande källorna. Servern är förberedd för drift bakom Cloudflare Access. `SPEC.md` beskriver hela planen.
+Projektet är under uppbyggnad (etapp 4–6). Sökning, närhetssök, statistik och grundposten går mot ett eget index över hela registret i Cloudflare D1, laddat från RAÄ:s GeoPackage-uttag och uppdaterat nattligen via RAÄ:s ändringsflöde. Inom ett semantiskt omfång (Dalarnas län) kan sökningen också gå på frågans innebörd (Vectorize och Workers AI). Saknas indexet, är det tomt eller fallerar ett indexanrop, används RAÄ:s levande källor (reservläge). Inventeringsböcker, dokument och historik hämtas alltid från de levande källorna, och relaterat material (foton, arkivhandlingar, föremål) från K-samsök. Servern är förberedd för drift bakom Cloudflare Access. `SPEC.md` beskriver hela planen.
 
 ## Verktyg
 
@@ -10,14 +10,15 @@ Projektet är under uppbyggnad (etapp 4–6). Sökning, närhetssök, statistik 
 |---|---|
 | `sok_lamningar` | Sök med fritext och filter: lämningsnummer eller RAÄ-nummer, lämningstyp, kategori, antikvarisk bedömning, kommun, socken, landskap, län, egenskap (t.ex. Material = Koppar) och område (`nara`, med avstånd till närmaste punkt på geometrin). Ger nummer, typ, bedömning, indelning, koordinat, lägesosäkerhet, ett utdrag på cirka 200 tecken runt träffen och länk. Svaret anger `sokkanaler`, `hamtad_fran` och `reservlage`. |
 | `lamningar_nara` | Lämningar närmast en punkt (lat/lon i WGS 84) inom en radie, eller inom en ruta. Avståndet räknas till närmaste punkt på lämningens geometri (punkt, linje eller yta), med väderstreck. |
-| `lamning` | Hela posten för 1–10 lämningar, på lämningsnummer, RAÄ-nummer, UUID eller K-samsök-URI. Grundposten ur indexet; valfritt med geometri (GeoJSON), referenser, dokument (med `dokument_ref`) och versionshistorik, som hämtas från Fornsök-appen. Ett RAÄ-nummer som delas av flera lämningar ger alla. |
+| `lamning` | Hela posten för 1–10 lämningar, på lämningsnummer, RAÄ-nummer, UUID eller K-samsök-URI. Grundposten ur indexet; valfritt med geometri (GeoJSON), referenser, dokument (med `dokument_ref`) och versionshistorik, som hämtas från Fornsök-appen, och en sammanfattning av relaterat material ur K-samsök (antal per slag och de första; resten med `relaterat`). Ett RAÄ-nummer som delas av flera lämningar ger alla. |
 | `lamning_dokument` | Dokumenten för en lämning: inventeringsboksuppslag, händelseloggar, bilder och maritim dokumentation, var och en med en `dokument_ref`. |
 | `hamta_dokument` | Hämtar ett dokument via `dokument_ref`. JPEG och PNG upp till 2 MB kommer som bild i svaret (så att en inventeringsbokssida kan läsas direkt); större filer och PDF som länk med metadata. |
+| `relaterat` | Material som K-samsök knyter till en lämning: foton, ritningar och teckningar i RAÄ:s arkiv (slag `foto`), arkivhandlingar som inventeringsboksuppslag (`arkivhandling`), museiföremål (`föremål`), `dokumentation`, äldre FMI-poster som lämningen ersätter (`äldre post`) och `övrigt` (t.ex. samma runsten i Samnordisk runtextdatabas). Per objekt: slag, relationstyp, titel, beskrivning, institution, årtal, länk till objektets sida, bildlänkar och rättighetsuppgiften ordagrant ur K-samsök. Filter på slag, `antal` och `sida`. Servern hämtar inga bilder, bara länkar. |
 | `statistik` | Antal lämningar per lämningstyp, kategori, bedömning, län, kommun, socken eller landskap, i en eller två nivåer, med samma filter som `sok_lamningar`. Högst 200 rader. En nivå utan filter går för hela landet (ur förberäknade tabeller); en nivå med filter går också för hela registret; två nivåer görs för högst 400 000 lämningar (200 000 med filter på område eller egenskap), annars ett fel som säger hur frågan kan delas. Kräver indexet. |
 | `uppslag` | Värdelistor: lämningstyper med kategori, kategorier, bedömningar, egenskapstyper med värden och antal (ur indexet), kommuner, socknar, landskap och län. |
-| `hitta_plats` | Ortnamn till koordinat: först socknar, kommuner (förberäknad mittpunkt, migrering 0003) och namngivna lämningar (ordsök i namnet) i indexet, sedan OpenStreetMap Nominatim (bara Sverige, högst ett anrop per sekund, svar sparas 30 dygn). Koordinaten kan skickas till `lamningar_nara`. |
+| `hitta_plats` | Ortnamn till koordinat: socknar, kommuner (förberäknad mittpunkt, migrering 0003) och namngivna lämningar (ordsök i namnet) i indexet, och OpenStreetMap Nominatim (bara Sverige, högst ett anrop per sekund, svar sparas 30 dygn) när indexet inte ger något, när träffen är en socken eller kommun, eller när namnet inte är exakt en namngiven lämning – så att orten själv kommer med som egen kandidat. Varje kandidat säger vilken sorts punkt den är (`punkttyp`/`punkt`): mittpunkt för socknens eller kommunens registrerade lämningar, ort enligt OpenStreetMap, eller namngiven lämning; svaret säger hur långt orten ligger från områdets mittpunkt. Koordinaten kan skickas till `lamningar_nara`. |
 
-Alla verktyg är läsande. Svaren har både läsbar text och `structuredContent` enligt ett `outputSchema`. Namn på kommuner, socknar, typer, län och egenskaper slås upp skiftlägesokänsligt; okända namn ger ett fel med närmaste förslag, och en socken som finns i flera län ger en lista att välja ur.
+Alla verktyg är läsande. Svaren har både läsbar text och `structuredContent` enligt ett `outputSchema`. Den läsbara texten har alltid en källrad i formen `Källa: <källa>; <hur färskt>.` (t.ex. `Källa: Lämningsindex (D1); index 2026-11-17.`), eftersom en del klienter (claude.ai) bara visar texten för modellen; samma uppgift står i `hamtad_fran`. Namn på kommuner, socknar, typer, län och egenskaper slås upp skiftlägesokänsligt; okända namn ger ett fel med närmaste förslag, och en socken som finns i flera län ger en lista att välja ur.
 
 ### Ordsökningen
 
@@ -59,6 +60,10 @@ Mycket vanliga ord (fler än 150 000 träffar, t.ex. "och") rangordnas inte med 
 
 I mycket täta områden prövas högst 5 000 kandidater med exakt avstånd, de närmaste först; svaret anger då radien inom vilken det är fullständigt. Högst 10 000 träffar går att bläddra till (`nabara`).
 
+### Relaterat material
+
+`relaterat` (och `lamning` med `inkludera: ["relaterat"]`) gör högst tre läsanrop mot K-samsök per lämning, och resultatet sparas 7 dygn i KV (`CACHE`; utan bindning ingen cache): `getRelations` (`relation=all`, `objectId=raa/lamning/{uuid}`) ger relationstyperna och de äldre FMI-poster lämningen ersätter; en sökning `relUri="lämningen" OR relUri="FMI-posten" …` (presentationsformatet, högst 500 objekt) ger objektens uppgifter i ett anrop; och bara för relationer som sökningen inte täcker görs ett objektuppslag `itemId="…" OR …`. Många foton är fortfarande kopplade till den äldre FMI-posten och inte till lämningen (Rök 1:1: 47 objekt till lämningen, 168 till FMI-posten); de tas med och märks med vilken FMI-post de gäller, men utan relationstyp (den står hos FMI-posten). Text och rättighetsuppgifter från K-samsök är extern text och rensas och citeras som registertext. Ett fel hos K-samsök fäller inte `lamning`: delen rapporteras som ej hämtad. Klassningen i slag bygger på tjänst och typ (`arkiv-bilder` → foto, `arkiv-dokument` → arkivhandling); museiföremål har inte setts kopplade till lämningar vid undersökningen, så den klassningen är oprövad mot riktiga data.
+
 `dokument_ref` är en ogenomskinlig referens som servern skapar. Den valideras strikt, och filen slås upp på nytt i lämningens dokumentlista innan något hämtas; bara filer i den listan kan nås, och bara via dokumentändpunkten. Innan en bild skickas kontrolleras storlek (enligt listan, `Content-Length` och faktiskt läst mängd), innehållstyp och filsignatur. Versionshistoriken visar publicerade versioner med åtgärd eller uppdrag, inte vad som ändrades.
 
 ## Källor
@@ -68,7 +73,7 @@ I mycket täta områden prövas högst 5 000 kandidater med exakt avstånd, de n
 | RAÄ:s [GeoPackage-uttag](https://pub.raa.se/nedladdning/datauttag/lamningar_v1/) | Indexet (grundladdning och avstämning, se `ingest/`) | Officiell, öppen, CC0 |
 | RAÄ:s ändringsflöde (`pub.raa.se/datauttag/lamningar`) | Nattsynken: vilka lämningar som ändrats | Officiell, öppen, CC0 |
 | [OpenStreetMap Nominatim](https://nominatim.org/) | `hitta_plats` när indexet saknar namnet | Öppen, ODbL; högst 1 anrop/s, identifierande User-Agent |
-| [K-samsök](https://www.raa.se/hitta-information/k-samsok/) (`kulturarvsdata.se/ksamsok/api`) | Reserv för sök och nummeruppslag, reserv för hela posten (JSON-LD) | Officiell, öppen, CC0 |
+| [K-samsök](https://www.raa.se/hitta-information/k-samsok/) (`kulturarvsdata.se/ksamsok/api`) | Reserv för sök och nummeruppslag, reserv för hela posten (JSON-LD), relaterat material (`getRelations`, sökindexen `relUri` och `itemId`) | Officiell, öppen; metadata CC0, medierna har egna rättigheter per objekt |
 | RAÄ:s [OGC API Features](https://inspire-raa.metria.se/geoserver/Kulturhistoriska_lamningar/ogc/features/v1/) | Reserv för närhetssök (ruta + CQL2-filter) | Officiell, öppen, CC0 |
 | Fornsök-appens läs-API (`app.raa.se/open/fornsok/api`) | Hela posten, värdelistor, dokument och filer, versionshistorik | **Odokumenterat och inofficiellt** – se nedan |
 
@@ -107,7 +112,7 @@ for f in ingest/out/falun/*.sql; do npx wrangler d1 execute fornsok --local -c <
 npx wrangler dev -c <din lokala konfiguration>
 ```
 
-Prova med en MCP-klient, till exempel MCP Inspector mot `http://localhost:8787/mcp`, eller med det medföljande röktestet (gör ett femtontal riktiga anrop mot RAÄ, bland annat hämtning av ett inventeringsboksuppslag; med `--index` kontrolleras också att indexet används, att `statistik` svarar och att posterna kommer ur indexet):
+Prova med en MCP-klient, till exempel MCP Inspector mot `http://localhost:8787/mcp`, eller med det medföljande röktestet (gör ett trettiotal riktiga läsanrop mot RAÄ, bland annat hämtning av ett inventeringsboksuppslag och relaterat material ur K-samsök, och kontrollerar att varje svar har en källrad; med `--index` kontrolleras också att indexet används, att `statistik` svarar och att posterna kommer ur indexet, och `hitta_plats` frågar OpenStreetMap en gång):
 
 ```bash
 node scripts/smoke.mjs http://localhost:8787/mcp
@@ -124,7 +129,23 @@ npm test               # vitest, mot inspelade svar i test/fixtures – inga nä
                        # (ett incheckat urval om 300 lämningar testar indexvägarna alltid; Falu kommun
                        #  och hela landet i ingest/.cache/ är valfria och hoppas över om filerna saknas)
 npm run type-check     # src/, test/ och ingest/
+npx oxlint
 ```
+
+### Kontrakttester
+
+`test/kontrakt/` innehåller kontrakttester mot de riktiga källorna (SPEC 10): cirka 28 riktiga läsanrop mot RAÄ:s tjänster (K-samsök, inklusive `getRelations` och objektuppslagen för relaterat material, Fornsök-appens läs-API, OGC API Features, ändringsflödet och GeoPackage-uttaget) som kontrollerar att ändpunkterna svarar och att svaren har de fält som koden läser, tolkade med projektets egna tolkare. Anropen går ett i taget med paus, med projektets User-Agent, och med ett hårt tak på 32 anrop per körning. De ingår inte i `npm test`.
+
+```bash
+npm run test:kontrakt  # = vitest run --config vitest.kontrakt.config.mts
+```
+
+De körs nattligen (05:47 UTC, efter RAÄ:s nattliga uppdatering) i GitHub Actions, `.github/workflows/kontrakt.yml`, och kan startas manuellt där (Run workflow, `workflow_dispatch`) eller lokalt med kommandot ovan. Ett misslyckat test ger en röd körning, och sammanfattningen (`test/kontrakt/sammanfatta.mjs`) skiljer två slags fel:
+
+- `[OTILLGÄNGLIG]` – tjänsten svarade inte (tidsgräns, nätverksfel, 5xx, 429). Oftast tillfälligt; säger inget om svarsformatet.
+- `[FORMAT]` – tjänsten svarade, men svaret avviker från det koden förutsätter (fält saknas, fel typ, ändpunkten finns inte längre, HTML i stället för JSON). Det är det verkliga larmet: koden behöver troligen ändras.
+
+Varje felrad har formen `[KLASS] källa | anrop | fält: avvikelse`.
 
 ## Åtkomst
 
@@ -180,8 +201,8 @@ src/
   index.ts              Worker: Access-JWT först, sedan begränsning per användare, sedan bara /mcp
   env.ts                Workerns miljö (inställningar och valfria bindningar)
   auth/                 Access-JWT (access.ts) och begränsning per användare (ratelimit.ts)
-  cache/                KV-cache för värdelistor och dokumentlistor
-  server.ts             McpServer med instruktioner och de åtta verktygen
+  cache/                KV-cache för värdelistor, dokumentlistor och relaterat material
+  server.ts             McpServer med instruktioner och de nio verktygen
   scheduled.ts          Schemalagda körningar: nattsynk och inbäddning
   sync/                 Nattsynk via RAÄ:s ändringsflöde
   semantic/             Inbäddning och semantisk sökning (Workers AI, Vectorize)
@@ -190,7 +211,7 @@ src/
   store/                Indexet i D1: sök, närhet, grundpost, statistik (index.ts), läge och reserv (access.ts)
   search/               Sammanslagning av rangordningar (reciprocal rank fusion)
   sources/              Ett gränssnitt per förmåga, en implementation per källa
-    ksamsok/            Frågebyggare och tolkning av K-samsök
+    ksamsok/            Frågebyggare och tolkning av K-samsök; relaterat material (relations.ts)
     ogc/                OGC API Features och CQL2
     fornsokapp/         Fornsök-appens läs-API
   upstream/             Den enda vägen ut: tillåtna anrop, tidsgräns, omförsök, samtidighet
@@ -200,6 +221,7 @@ ingest/                 Inläsning av GeoPackage till indexet (Node 22, körs me
 migrations/             D1-schemat
 test/                   vitest; inspelade svar under test/fixtures, indexet mot Falu kommun
 scripts/smoke.mjs       Röktest mot en körande server (även --utan-inloggning)
+test/kontrakt/          Kontrakttester mot RAÄ:s riktiga källor (npm run test:kontrakt)
 scripts/matning.ts      Mätning av indexets frågor mot en lokal laddning av hela landet
 scripts/dela-migrering.mjs  Delar en migrering i en fil per sats (för D1:s gränser)
 scripts/bygg-testurval.mjs  Bygger det incheckade testurvalet (test/fixtures/falun-urval.sql)

@@ -7,6 +7,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { citatStycken, rad, STYCKE_INDRAG } from "../../src/tools/common";
+import { MAX_KOMBINERANDE, MAX_RAD_TECKEN, MAX_STYCKEN_TECKEN, rensaRad, rensaStycken } from "../../src/extern_text";
 import { connectMcp, standardRoutes } from "../helpers";
 import { d1FromSqlite } from "./d1-adapter";
 import { loadUrval } from "./urval-fixture";
@@ -96,6 +97,30 @@ describe("extern text i verktygens svar (testurvalet, alltid)", () => {
 		const n = await c.client.callTool({ name: "lamningar_nara", arguments: { lat: 60.7337, lon: 15.4564, radie_m: 500 } });
 		inga(text(n));
 		expect(text(n)).toContain("(Bjursås 27:1 / dokument_ref: fejk2)");
+	});
+
+	it("granskningen, punkt 3: variationsväljare, hangulfyllare, punktskriftsblank och CGJ bort; kombinerande tecken begränsade; längdgräns med markering", () => {
+		const osynliga = [0xfe00, 0xfe0f, 0xe0100, 0xe01ef, 0x3164, 0x115f, 0x1160, 0xffa0, 0x2800, 0x034f].map((c) => String.fromCodePoint(c)).join("");
+		expect(rad(`a${osynliga}b`)).toBe("ab");
+		// 2 000 kombinerande tecken i följd: högst MAX_KOMBINERANDE kvar.
+		const zalgo = `x${"\u0300".repeat(2000)}y`;
+		const r = rensaRad(zalgo);
+		expect(r.length).toBe(2 + MAX_KOMBINERANDE);
+		expect(r.startsWith("x") && r.endsWith("y")).toBe(true);
+		// Svensk text påverkas inte (NFC: å, ä, ö är förkomponerade).
+		expect(rad("Bjursa\u030as kyrka")).toBe("Bjursås kyrka");
+		// Längdgräns per fält: tydlig markering och hur mycket som saknas.
+		const lang = "a".repeat(MAX_RAD_TECKEN + 50);
+		const kort = rensaRad(lang);
+		expect(kort).toBe(`${"a".repeat(MAX_RAD_TECKEN)} […avkortat av servern: 50 tecken till]`);
+		// Ett surrogatpar delas aldrig.
+		const emoji = `${"a".repeat(MAX_RAD_TECKEN - 1)}😀😀`;
+		expect(rensaRad(emoji).startsWith(`${"a".repeat(MAX_RAD_TECKEN - 1)} […avkortat`)).toBe(true);
+		// Flerradiga fält: gräns för alla stycken sammanlagt.
+		const stycken = rensaStycken(`${"b".repeat(MAX_STYCKEN_TECKEN - 10)}\n${"c".repeat(30)}\n${"d".repeat(5)}`);
+		expect(stycken).toHaveLength(2);
+		expect(stycken[1]).toBe(`${"c".repeat(10)} […avkortat av servern: 25 tecken till]`);
+		expect(citatStycken("x".repeat(MAX_STYCKEN_TECKEN + 1))).toMatch(/\[…avkortat av servern: 1 tecken till\]»$/);
 	});
 
 	it("hjälpfunktionerna: taggtecken och nollbreddstecken bort, enradsfält på en rad", () => {

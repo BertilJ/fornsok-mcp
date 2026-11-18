@@ -57,6 +57,23 @@ export const ALLOWED_CALLS: readonly AllowedCall[] = [
 		},
 		requiredQuery: ["method", "query"],
 	},
+	// K-samsök: relationer för en lämning (verktyget relaterat). Bara relation=all
+	// och bara lämningar (raa/lamning/{uuid}); objektens uppgifter hämtas med
+	// sökningen ovan (relUri/itemId, recordSchema=presentation).
+	{
+		id: "ksamsok.relations",
+		source: "ksamsok",
+		method: "GET",
+		origin: "https://kulturarvsdata.se",
+		path: /^\/ksamsok\/api$/,
+		query: {
+			method: /^getRelations$/,
+			relation: /^all$/,
+			objectId: new RegExp(`^raa/lamning/${UUID}$`),
+			maxCount: /^\d{1,4}$/,
+		},
+		requiredQuery: ["method", "relation", "objectId"],
+	},
 	// K-samsök: en post som JSON-LD (reserv för `lamning`)
 	{
 		id: "ksamsok.lamning",
@@ -186,11 +203,26 @@ export function checkAllowed(method: string, rawUrl: string | URL): AllowedCall 
 	if (candidates.length === 0) {
 		throw new DisallowedCallError(`Anropet finns inte på listan över tillåtna anrop: ${m} ${url.origin}${url.pathname}`);
 	}
-	const call = candidates.find((c) => c.method === m);
-	if (!call) {
+	const calls = candidates.filter((c) => c.method === m);
+	if (calls.length === 0) {
 		throw new DisallowedCallError(`Metoden ${m} är inte tillåten för ${url.origin}${url.pathname}`);
 	}
+	// Flera poster kan ha samma sökväg (K-samsöks api: search och getRelations). Den första
+	// vars frågeparametrar alla stämmer gäller; annars ges felet för den första posten.
+	let first: DisallowedCallError | null = null;
+	for (const call of calls) {
+		try {
+			checkQuery(call, url);
+			return call;
+		} catch (e) {
+			if (!(e instanceof DisallowedCallError)) throw e;
+			first ??= e;
+		}
+	}
+	throw first as DisallowedCallError;
+}
 
+function checkQuery(call: AllowedCall, url: URL): void {
 	const seen = new Set<string>();
 	for (const [key, value] of url.searchParams) {
 		if (seen.has(key)) throw new DisallowedCallError(`Frågeparametern ${key} förekommer flera gånger`);
@@ -202,5 +234,4 @@ export function checkAllowed(method: string, rawUrl: string | URL): AllowedCall 
 	for (const key of call.requiredQuery ?? []) {
 		if (!seen.has(key)) throw new DisallowedCallError(`Frågeparametern ${key} saknas för ${call.id}`);
 	}
-	return call;
 }

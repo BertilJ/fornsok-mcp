@@ -6,6 +6,7 @@ import { registerHamtaDokument, registerLamningDokument } from "./tools/dokument
 import { registerHittaPlats } from "./tools/hitta_plats";
 import { registerLamning } from "./tools/lamning";
 import { registerLamningarNara } from "./tools/lamningar_nara";
+import { registerRelaterat } from "./tools/relaterat";
 import { registerSokLamningar } from "./tools/sok_lamningar";
 import { registerStatistik } from "./tools/statistik";
 import { registerUppslag } from "./tools/uppslag";
@@ -25,6 +26,7 @@ export function createServer(deps: ToolDeps): McpServer {
 	registerLamning(server, deps);
 	registerLamningDokument(server, deps);
 	registerHamtaDokument(server, deps);
+	registerRelaterat(server, deps);
 	registerStatistik(server, deps);
 	registerUppslag(server, deps);
 	if (deps.plats) registerHittaPlats(server, deps.plats);
