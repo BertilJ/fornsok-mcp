@@ -5,7 +5,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MODELL } from "../../src/semantic/bindings";
-import { AI_BATCH, arTillfalligtAiFel, embedStatus, runEmbedBatch } from "../../src/semantic/embed";
+import { AI_BATCH, arIndatafel, arTillfalligtAiFel, BELAGG_ANNAN_LYCKADES, BELAGG_INDATAFEL, embedStatus, KONTROLLTEXT, runEmbedBatch } from "../../src/semantic/embed";
 import { createSemanticSearch, semanticSearch } from "../../src/semantic/search";
 import { runSync } from "../../src/sync/run";
 import { appFixture, emptyDb, fakeRaa, flodePost, openD1, UUID } from "../sync/helpers";
@@ -388,19 +388,133 @@ describe("runEmbedBatch", () => {
 		expect(db.prepare("SELECT uuid FROM inbaddning").all()).toEqual([{ uuid: uuidN(4) }]);
 	});
 
-	it("Workers AI fallerar för en lämning: felet bokförs, inget bäddas in, nästa körning försöker igen", async () => {
+	it("en lämning vars text fallerar medan tjänsten fungerar (kontrolltexten går igenom): felet bokförs med belägg, nästa körning försöker igen", async () => {
 		insertLamning(db, { uuid: uuidN(1), beskrivning: "Kolbotten, rund, 12 m diam." });
-		ai.fail = true;
+		ai.failIf = (t) => t.includes("Kolbotten");
 		const err = vi.spyOn(console, "error").mockImplementation(() => {});
 		try {
-			expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 0, fel: 1 });
+			expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 0, fel: 1, klar: false });
 		} finally {
 			err.mockRestore();
 		}
+		expect(ai.calls).toEqual([[KONTROLLTEXT]]);
 		expect(db.prepare("SELECT count(*) AS n FROM inbaddning").get()).toEqual({ n: 0 });
-		expect(db.prepare("SELECT forsok FROM inbaddning_fel").get()).toEqual({ forsok: 1 });
-		ai.fail = false;
+		const rad = db.prepare("SELECT forsok, senaste_fel FROM inbaddning_fel").get() as { forsok: number; senaste_fel: string };
+		expect(rad.forsok).toBe(1);
+		expect(rad.senaste_fel.startsWith(BELAGG_ANNAN_LYCKADES)).toBe(true);
+		ai.failIf = undefined;
 		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 1, klar: true });
+		// Lyckad inbäddning tar bort felraden.
+		expect(db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get()).toEqual({ n: 0 });
+	});
+
+	it("avbrott med okänt felmeddelande (granskningens fall, högst 6 texter): inget bokförs, inget försök förbrukas, inte klart; allt bäddas in när AI fungerar igen", async () => {
+		for (let i = 1; i <= 6; i++) insertLamning(db, { uuid: uuidN(i), beskrivning: `Fångstgrop nummer ${i}, rund, 3 m i diameter.` });
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			ai.run = async () => {
+				throw new Error("InferenceUpstreamError: backend returned an unexpected response");
+			};
+			for (let k = 0; k < 5; k++) await expect(runEmbedBatch(env())).rejects.toThrow(/avbrott/);
+			expect(db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get()).toEqual({ n: 0 });
+			expect(db.prepare("SELECT count(*) AS n FROM synk_status WHERE nyckel = 'inbaddning_klar'").get()).toEqual({ n: 0 });
+		} finally {
+			err.mockRestore();
+			warn.mockRestore();
+		}
+		ai = new FakeAi();
+		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 6, klar: true });
+		expect(vec.store.size).toBe(6);
+	});
+
+	it("avbrott med okänt felmeddelande och fler än 6 texter: få anrop, inget bokförs", async () => {
+		for (let i = 1; i <= 30; i++) insertLamning(db, { uuid: uuidN(i), beskrivning: `Fångstgrop nummer ${i}, rund, 3 m i diameter.` });
+		let anrop = 0;
+		ai.run = async () => {
+			anrop++;
+			throw new Error("InferenceUpstreamError: backend returned an unexpected response");
+		};
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			for (let k = 0; k < 3; k++) await expect(runEmbedBatch(env())).rejects.toThrow(/avbrott/);
+		} finally {
+			err.mockRestore();
+		}
+		// Ett anrop med delen och ett med kontrolltexten per körning.
+		expect(anrop).toBe(6);
+		expect(db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get()).toEqual({ n: 0 });
+	});
+
+	it("ett entydigt indatafel (3006, för stor) bokförs även när inget annat lyckas", async () => {
+		insertLamning(db, { uuid: uuidN(1), beskrivning: "Kolbotten, rund, 12 m diam." });
+		ai.run = async () => {
+			throw new Error("AiError: 3006: Request is too large");
+		};
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			expect(await runEmbedBatch(env())).toMatchObject({ fel: 1, klar: false });
+		} finally {
+			err.mockRestore();
+		}
+		const rad = db.prepare("SELECT forsok, senaste_fel FROM inbaddning_fel").get() as { forsok: number; senaste_fel: string };
+		expect(rad.forsok).toBe(1);
+		expect(rad.senaste_fel.startsWith(BELAGG_INDATAFEL)).toBe(true);
+		expect(arIndatafel(new Error("AiError: 3006: Request is too large"))).toBe(true);
+		expect(arIndatafel(Object.assign(new Error("x"), { status: 413 }))).toBe(true);
+		expect(arIndatafel(new Error("5004: Invalid data"))).toBe(false);
+		expect(arIndatafel(new Error("InferenceUpstreamError: backend returned an unexpected response"))).toBe(false);
+	});
+
+	it("överhoppad lämning prövas igen efter sju dygn, även om raden inte ändrats och omfånget är klart", async () => {
+		insertLamning(db, { uuid: uuidN(1), beskrivning: "TRASIG kolbotten." });
+		insertLamning(db, { uuid: uuidN(2), beskrivning: "Fångstgrop, rund." });
+		ai.failIf = (t) => t.includes("TRASIG");
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const dag = (d: number) => ({ now: new Date(Date.UTC(2026, 10, 1 + d, 4)) });
+		try {
+			for (let k = 0; k < 3; k++) await runEmbedBatch(env(), dag(0));
+			expect(db.prepare("SELECT forsok FROM inbaddning_fel").get()).toEqual({ forsok: 3 });
+			expect(await runEmbedBatch(env(), dag(1))).toMatchObject({ klar: true, inbaddade: 0 });
+			expect(await runEmbedBatch(env(), dag(6))).toMatchObject({ klar: true, inbaddade: 0 });
+			ai.failIf = undefined;
+			expect(await runEmbedBatch(env(), dag(6))).toMatchObject({ klar: true, inbaddade: 0 });
+			// Sju dygn efter senaste försöket: prövas igen och lyckas.
+			expect(await runEmbedBatch(env(), dag(7))).toMatchObject({ inbaddade: 1, klar: true });
+		} finally {
+			err.mockRestore();
+			warn.mockRestore();
+		}
+		expect(vec.store.has(uuidN(1))).toBe(true);
+	});
+
+	it("engångsrensning: överhoppningar utan belägg (från före rättningen) tas bort och prövas igen; indatafel och nya rader står kvar", async () => {
+		insertLamning(db, { uuid: uuidN(1), beskrivning: "Kolbotten, rund, 12 m diam." });
+		insertLamning(db, { uuid: uuidN(2), beskrivning: "Fångstgrop, rund." });
+		insertLamning(db, { uuid: uuidN(3), beskrivning: "Röjningsröse." });
+		insertLamning(db, { uuid: uuidN(4), beskrivning: "Tjärdal, 10 m lång och 3 m bred." });
+		const h = (u: string) => (db.prepare("SELECT hash FROM lamning WHERE uuid = ?").get(u) as { hash: string }).hash;
+		const ins = db.prepare("INSERT INTO inbaddning_fel (uuid, rad_hash, forsok, senaste_fel, andrad) VALUES (?, ?, 3, ?, ?)");
+		const nu = new Date().toISOString();
+		ins.run(uuidN(1), h(uuidN(1)), "InferenceUpstreamError: backend returned an unexpected response", nu);
+		ins.run(uuidN(2), h(uuidN(2)), "AiError: 3006: Request is too large", nu);
+		ins.run(uuidN(3), h(uuidN(3)), `${BELAGG_ANNAN_LYCKADES}AiError: 3010: Invalid input`, nu);
+		// Omfånget markerat klart av den gamla logiken.
+		db.prepare("INSERT INTO synk_status (nyckel, varde, andrad) VALUES ('inbaddning_klar', 'gammal', 't')").run();
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const r = await runEmbedBatch(env());
+			expect(r).toMatchObject({ inbaddade: 2, klar: true });
+			expect(vec.store.has(uuidN(1))).toBe(true);
+			expect(db.prepare("SELECT uuid FROM inbaddning_fel ORDER BY uuid").all()).toEqual([{ uuid: uuidN(2) }, { uuid: uuidN(3) }]);
+			// Idempotent: en ny rad utan belägg rensas inte en gång till.
+			ins.run(uuidN(4), "annan", "okänt", nu);
+			await runEmbedBatch(env());
+			expect((db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get() as { n: number }).n).toBe(3);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	it("en text som modellen avvisar blockerar inte resten: delen halveras, posten hoppas över efter tre försök", async () => {
@@ -426,16 +540,32 @@ describe("runEmbedBatch", () => {
 		expect(vec.store.size).toBeGreaterThanOrEqual(59);
 	});
 
-	it("Workers AI helt nere: körningen ger upp efter ett begränsat antal anrop", async () => {
+	it("Workers AI helt nere: körningen ger upp efter två anrop (delen och kontrolltexten) utan att bokföra något", async () => {
 		for (let i = 1; i <= 120; i++) insertLamning(db, { uuid: uuidN(i), beskrivning: `Fångstgrop nummer ${i}, rund, 3 m i diameter.` });
 		ai.fail = true;
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await expect(runEmbedBatch(env())).rejects.toThrow(/avbrott/);
+			expect(err.mock.calls.length).toBe(2);
+		} finally {
+			err.mockRestore();
+		}
+		expect(db.prepare("SELECT count(*) AS n FROM inbaddning").get()).toEqual({ n: 0 });
+		expect(db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get()).toEqual({ n: 0 });
+	});
+
+	it("tillfälliga fel i många delar: körningen ger upp efter ett begränsat antal anrop", async () => {
+		for (let i = 1; i <= 700; i++) insertLamning(db, { uuid: uuidN(i), beskrivning: `Fångstgrop nummer ${i}, rund, 3 m i diameter.` });
+		ai.run = async () => {
+			throw new Error("InferenceUpstreamError: 503 Service Unavailable");
+		};
 		const err = vi.spyOn(console, "error").mockImplementation(() => {});
 		try {
 			await expect(runEmbedBatch(env())).rejects.toThrow(/fallerade 12 gånger i körningen/);
 		} finally {
 			err.mockRestore();
 		}
-		expect(db.prepare("SELECT count(*) AS n FROM inbaddning").get()).toEqual({ n: 0 });
+		expect(db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get()).toEqual({ n: 0 });
 	});
 
 	it("oväntad svarsform från Workers AI: felet beskriver formen, inte innehållet", async () => {

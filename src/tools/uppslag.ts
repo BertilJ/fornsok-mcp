@@ -93,7 +93,17 @@ export async function uppslag(args: UppslagArgs, deps: ToolDeps) {
 		const d = await deps.domains.get();
 		if (d.kalla === "index") kalla = "Lämningsindex (D1): namn och koder som förekommer i registret";
 		kallaText = d.kalla === "index" ? "Lämningsindex (D1), namn och koder som förekommer i registret" : "Fornsök-appens värdelistor";
-		hamtad_fran = /^\d{4}-\d{2}-\d{2}/.test(d.hamtad ?? "") ? `listorna hämtade ${d.hamtad.slice(0, 10)}${d.kalla === "index" ? "" : " (cachas upp till 24 timmar)"}` : "okänt när listorna hämtades";
+		if (d.kalla === "index") {
+			// Reserven bygger listorna ur indexet vid varje uppslag (hamtad är då nu): ange indexets datum.
+			let ixDatum: string | null = null;
+			try {
+				const ix = deps.index ? await deps.index.open() : null;
+				ixDatum = ix?.ok ? ix.hamtad_fran : null;
+			} catch {
+				ixDatum = null;
+			}
+			hamtad_fran = `listorna byggda ur indexet (${ixDatum ?? "indexets datum okänt"})`;
+		} else hamtad_fran = /^\d{4}-\d{2}-\d{2}/.test(d.hamtad ?? "") ? `listorna hämtade ${d.hamtad.slice(0, 10)} (cachas upp till 24 timmar)` : "okänt när listorna hämtades";
 		switch (args.lista) {
 			case "lamningstyper":
 				varden = d.lamningstyper.map((t) => ({ namn: t.namn, kategori: t.kategorier, aktiv: t.aktiv }));

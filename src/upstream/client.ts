@@ -3,7 +3,8 @@
  *
  * - Varje anrop (och varje omdirigering) prövas mot listan över tillåtna anrop.
  * - Tidsgräns 10 s per försök.
- * - Ett omförsök vid 5xx, 429, tidsgräns eller nätverksfel.
+ * - Ett omförsök vid 5xx, 429, tidsgräns eller nätverksfel (`retries: 0` stänger
+ *   av omförsöket, t.ex. för Nominatim, vars villkor inte tillåter tätare anrop).
  * - Högst 4 samtidiga anrop per källa.
  * - Identifierande User-Agent.
  */
@@ -18,6 +19,8 @@ export interface UpstreamResponse {
 	contentType: string;
 	body: string;
 	url: string;
+	/** Rubriken `Retry-After`, om den finns (används för Nominatims spärr). */
+	retryAfter?: string | null;
 }
 
 export interface UpstreamBinaryResponse {
@@ -37,6 +40,8 @@ export interface UpstreamClientOptions {
 	maxConcurrent?: number;
 	/** Väntetid före omförsök (ms). */
 	retryDelayMs?: number;
+	/** Antal omförsök (0 eller 1; standard 1). */
+	retries?: number;
 	/** Största tillåtna svar i byte. */
 	maxBodyBytes?: number;
 	/** User-Agent (se `userAgent()` i config.ts). */
@@ -135,6 +140,7 @@ export class UpstreamClient {
 	private readonly fetchImpl: FetchLike;
 	private readonly timeoutMs: number;
 	private readonly retryDelayMs: number;
+	private readonly attempts: number;
 	private readonly maxBodyBytes: number;
 	private readonly semaphores = new Map<SourceId, Semaphore>();
 	private readonly maxConcurrent: number;
@@ -144,6 +150,7 @@ export class UpstreamClient {
 		this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
 		this.timeoutMs = options.timeoutMs ?? UPSTREAM_TIMEOUT_MS;
 		this.retryDelayMs = options.retryDelayMs ?? 300;
+		this.attempts = 1 + Math.max(0, Math.min(1, options.retries ?? 1));
 		this.maxBodyBytes = options.maxBodyBytes ?? MAX_BODY_BYTES;
 		this.maxConcurrent = options.maxConcurrent ?? MAX_CONCURRENT_PER_SOURCE;
 		this.userAgent = options.userAgent ?? USER_AGENT;
@@ -172,6 +179,7 @@ export class UpstreamClient {
 			contentType: res.headers.get("content-type") ?? "",
 			body: await this.readBody(res, source),
 			url: res.url || String(url),
+			retryAfter: res.headers.get("retry-after"),
 		}));
 	}
 
@@ -217,11 +225,11 @@ export class UpstreamClient {
 		const source = call.source;
 		return this.runLimited(source, async () => {
 			let lastError: unknown;
-			for (let attempt = 0; attempt < 2; attempt++) {
+			for (let attempt = 0; attempt < this.attempts; attempt++) {
 				if (attempt > 0) await sleep(this.retryDelayMs);
 				try {
 					const res = await this.fetchFollowingAllowedRedirects(String(url), accept);
-					if ((res.status >= 500 || res.status === 429) && attempt === 0) {
+					if ((res.status >= 500 || res.status === 429) && attempt < this.attempts - 1) {
 						lastError = new UpstreamError(source, `${SOURCE_NAMES[source]} svarade ${res.status}`, res.status);
 						await res.body?.cancel();
 						if (res.status === 429) await sleep(retryAfterMs(res.headers.get("retry-after")));

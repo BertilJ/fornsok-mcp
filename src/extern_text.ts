@@ -13,8 +13,11 @@
  *   variationsväljare (U+FE00–FE0F, U+E0100–E01EF), hangulfyllare (U+115F,
  *   U+1160, U+3164, U+FFA0), punktskriftens tomma cell (U+2800) och CGJ (U+034F).
  * - Kombinerande tecken (Unicode M) i följd begränsas till MAX_KOMBINERANDE
- *   (svensk text har efter NFC inga alls; tusentals i rad kan dölja eller
- *   förvränga omgivande text).
+ *   (svensk text har efter NFC inga alls, men vokaliserad hebreiska med
+ *   kantillationstecken, vietnamesiska och fonetisk transkription har 2–5 i
+ *   följd; tusentals i rad kan dölja eller förvränga omgivande text).
+ * - Efter att osynliga tecken tagits bort normaliseras texten till NFC igen,
+ *   så att t.ex. a + U+200B + U+0308 blir ä och inte a + lös diakrit.
  * - Varje fält har en längdgräns (MAX_RAD_TECKEN för en rad, MAX_STYCKEN_TECKEN
  *   för flerradig text); längre text avkortas med en tydlig markering.
  * - Tecknen som svaren använder som avgränsning byts mot närliggande tecken:
@@ -28,7 +31,7 @@ const STYR = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]/
 // oxlint-disable-next-line no-misleading-character-class -- variationsväljare och CGJ ska bort var för sig, inte som del av ett tecken
 const OSYNLIGA = /[\p{Cf}\u{E0000}-\u{E007F}\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u115F\u1160\u3164\uFFA0\u2800\u034F]/gu;
 /** Högst så många kombinerande tecken i följd behålls. */
-export const MAX_KOMBINERANDE = 3;
+export const MAX_KOMBINERANDE = 8;
 const KOMBINERANDE = new RegExp(`(\\p{M}{${MAX_KOMBINERANDE}})\\p{M}+`, "gu");
 /** Längsta fält på en rad (namn, titlar, motiveringar) efter rensning. */
 export const MAX_RAD_TECKEN = 4000;
@@ -58,6 +61,7 @@ export function rensaTecken(s: string): string {
 	return s
 		.normalize("NFC")
 		.replace(OSYNLIGA, "")
+		.normalize("NFC")
 		.replace(KOMBINERANDE, "$1")
 		.replace(STYR, " ")
 		.replace(/\t/g, " ")

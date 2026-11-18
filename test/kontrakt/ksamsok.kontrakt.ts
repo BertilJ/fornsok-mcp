@@ -9,7 +9,7 @@ import { describe, it } from "vitest";
 import { KSAMSOK_LAMNING_HTTPS } from "../../src/config";
 import { asArray, mergeHit, parseFieldsRecord, parseJsonLd, parsePresentationRecord, parseSearchResponse, uuidFromUri } from "../../src/sources/ksamsok/parse";
 import { buildQuery, buildSearchUrl, SEARCH_FIELDS } from "../../src/sources/ksamsok/query";
-import { FMI_URI_RE, KSAMSOK_OBJEKT_URI_RE, objektUrl, parsePresObjekt, parseRelations, relationsUrl, relUriUrl } from "../../src/sources/ksamsok/relations";
+import { FMI_URI_RE, KSAMSOK_OBJEKT_URI_RE, lankVard, objektUrl, parsePresObjekt, parseRelations, relationsUrl, relUriUrl } from "../../src/sources/ksamsok/relations";
 import { en, hamta, jsonSvar, Kontroll, skapaKlient, TESTNUMMER, TESTPOSTER, tolka } from "./stod";
 
 const KALLA = "ksamsok" as const;
@@ -226,6 +226,16 @@ describe("K-samsök: relaterat material", () => {
 			k.krav(!!o.url, `${o.uri}.pres:representations[format=HTML]`, "ingen HTML-representation (länken till objektets sida)");
 		}
 		k.krav(dok.some((o) => o.tjanst === "arkiv-dokument"), "pres:service", `väntade minst ett inventeringsboksuppslag (arkiv-dokument), fick ${JSON.stringify([...new Set(dok.map((o) => o.tjanst))])}`);
+		// Objekt som inte har en relation till lämningen är funna via en FMI-post: koden läser
+		// vilken ur pres:references (annars "koppling okänd"). Andra lämningar som ersätter samma
+		// FMI-post har inga referenser och räknas inte här.
+		const direkt = new Set(rel.map((r) => r.uri));
+		const viaFmi = dok.filter((o) => !direkt.has(o.uri) && !/\/raa\/lamning\//.test(o.uri));
+		const utanRef = viaFmi.filter((o) => !o.referenser.some((r) => fmi.includes(r)));
+		k.krav(utanRef.length === 0, "pres:references.pres:reference", `${utanRef.length} av ${viaFmi.length} objekt funna via en FMI-post saknar referens till FMI-posten, t.ex. ${utanRef[0]?.uri}`);
+		// Länkarna går till kända värdar (annars märks de som okänd värd i svaret).
+		const vardar = [...new Set(dok.flatMap((o) => [o.url, ...o.bilder.flatMap((b) => [b.miniatyr, b.stor, b.licens_url])]).filter((u): u is string => !!u).map((u) => lankVard(u)).filter((v) => !v.kand).map((v) => v.vard))];
+		k.krav(vardar.length === 0, "pres:representations / pres:image", `länkar till värdar utanför listan över kända värdar: ${JSON.stringify(vardar)}`);
 		k.klar();
 	});
 

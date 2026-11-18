@@ -3,18 +3,33 @@
  *
  * 1. Indexet (D1): socknar och kommuner (mittpunkt av områdets lämningar) och
  *    namngivna lämningar (lämningens mittpunkt).
- * 2. Bara om indexet inte ger något: OpenStreetMap Nominatim, begränsat till
- *    Sverige. Användningsvillkoren (operations.osmfoundation.org/policies/
- *    nominatim, läst 2026-11-17) följs så här:
+ * 2. OpenStreetMap Nominatim, begränsat till Sverige, när indexet inte ger
+ *    något, när en träff är en socken eller kommun (dess punkt är en
+ *    tyngdpunkt, inte orten) eller när namnet inte är exakt en namngiven
+ *    lämning (behoverOrt). Det är alltså de flesta frågor som inte gäller en
+ *    namngiven lämning. Användningsvillkoren (operations.osmfoundation.org/
+ *    policies/nominatim, läst 2026-11-18: högst 1 anrop/s summerat över alla
+ *    användare av tjänsten, cache, identifierande User-Agent, inget
+ *    autocomplete; klienter som upprepar samma fråga kan spärras) följs så här:
  *    - högst ett anrop per sekund: anropen köas per isolat med minst 1,1 s
- *      mellanrum (servern har få användare; flera isolat samtidigt är ovanligt),
+ *      mellanrum, och tidpunkten för senaste anropet läses och skrivs i KV
+ *      (`CACHE`) så att mellanrummet hålls även mellan isolat, så långt KV:s
+ *      fördröjning medger,
+ *    - inga omförsök: klienten har `retries: 0`,
+ *    - vid 429, 403, 5xx, tidsgräns eller nätverksfel spärras tjänsten i minst
+ *      10 minuter (längre om `Retry-After` säger det, högst ett dygn). Spärren
+ *      ligger i KV och i isolatet, och under den frågas Nominatim inte alls;
+ *      svaret säger då att OpenStreetMap inte frågades,
  *    - identifierande User-Agent: projektets userAgent(CONTACT_URL),
- *    - svaren (även tomma) sparas 30 dygn i KV (`CACHE`), så samma fråga inte
- *      skickas igen,
- *    - inget autocomplete, inga systematiska frågor: verktyget gör ett anrop
- *      per fråga, och bara när indexet saknar svar,
+ *    - svaren (även tomma) sparas 30 dygn i KV, så samma fråga inte skickas igen,
+ *    - inget autocomplete, inga systematiska frågor: högst ett anrop per fråga,
  *    - tjänsten kan stängas av utan kodändring: `NOMINATIM="av"`,
  *    - attribution (© OpenStreetMap-bidragsgivare, ODbL) i svaret.
+ *
+ * Ort och område (socken/kommun) med samma namn paras bara ihop när de
+ * rimligen är samma plats (sammaPlats); annars visas de som skilda kandidater
+ * utan rekommendation. OpenStreetMap-träffar utanför angivet län eller kommun
+ * tas bort.
  *
  * Registreras inte här; se registerHittaPlats och createHittaPlatsDeps.
  */
@@ -25,7 +40,7 @@ import type { KvLike } from "../cache/kv";
 import { publicUrl, userAgent } from "../config";
 import { ToolInputError, UpstreamError } from "../errors";
 import { isInSweden, round, toPlanar } from "../geo/sweref";
-import { findLan } from "../lookup/names";
+import { findLan, normalizeName } from "../lookup/names";
 import type { D1Like } from "../store/d1";
 import { buildFtsQuery } from "../store/fts";
 import { checkAllowed } from "../upstream/allowlist";
@@ -35,6 +50,23 @@ import { READ_ONLY, citat, kallrad, ok, rad, runTool } from "./common";
 export const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
 export const NOMINATIM_TTL_S = 30 * 24 * 60 * 60;
 export const NOMINATIM_MIN_MELLANRUM_MS = 1100;
+/** Spärr efter fel hos Nominatim (429, 403, 5xx, tidsgräns, nätverksfel). */
+export const NOMINATIM_SPARR_MS = 10 * 60_000;
+/** Längsta spärr, även om `Retry-After` begär mer. */
+export const NOMINATIM_SPARR_MAX_MS = 24 * 60 * 60_000;
+export const NOMINATIM_SPARR_KEY = "nominatim:sparr:v1";
+export const NOMINATIM_SENASTE_KEY = "nominatim:senaste:v1";
+/**
+ * Ort och socken räknas som samma plats när orten ligger inom områdets
+ * utbredning (de registrerade lämningarnas ytterpunkter) med denna marginal.
+ * En socken i södra och mellersta Sverige är 5–20 km över, kyrkbyn ligger inne
+ * i socknen och lämningarnas utbredning täcker oftast nästan hela socknen; 5 km
+ * räcker för en by i kanten av den. Stora norrlandssocknar har stor utbredning
+ * och ryms därför av samma regel.
+ */
+export const SAMMA_PLATS_MARGINAL_KM = 5;
+/** Utan känd utbredning: största avstånd mellan ort och områdets mittpunkt. */
+export const SAMMA_PLATS_MAX_KM = 15;
 export const NOMINATIM_ATTRIBUTION =
 	"© OpenStreetMap-bidragsgivare, ODbL 1.0 (https://osm.org/copyright)";
 const MAX_KANDIDATER = 10;
@@ -71,6 +103,8 @@ export function createHittaPlatsDeps(opts: {
 		client: new UpstreamClient({
 			userAgent: userAgent(opts.contactUrl),
 			maxConcurrent: 1,
+			// Inga omförsök mot Nominatim: fel leder i stället till en spärr (se överst).
+			retries: 0,
 			...(opts.fetch ? { fetch: opts.fetch } : {}),
 		}),
 		nominatim: (opts.nominatim ?? "").trim().toLowerCase() !== "av",
@@ -129,6 +163,8 @@ export const hittaPlatsOutput = z.object({
 	kommun: z.string().nullable(),
 	lan: z.string().nullable(),
 	kalla: z.enum(["index", "nominatim", "index+nominatim", "ingen"]),
+	/** Frågades OpenStreetMap: ja (nu eller sparat svar), nej (behövdes inte, avstängt eller spärrat efter fel), fel. */
+	openstreetmap: z.enum(["fragad", "sparat_svar", "behovdes_inte", "avstangt", "sparrad", "fel"]),
 	/** Hur färskt svaret är (indexets datum, och om OpenStreetMap-svaret var sparat). */
 	hamtad_fran: z.string(),
 	kandidater: z.array(kandidat),
@@ -142,8 +178,11 @@ export type Kandidat = z.infer<typeof kandidat>;
 
 export const HITTA_PLATS_BESKRIVNING =
 	"Ortnamn till koordinat (WGS 84, med SWEREF 99 TM i den strukturerade delen). Söker i serverns index bland socknar, kommuner och namngivna lämningar " +
-	"(t.ex. källor och stenar med namn), och i OpenStreetMap Nominatim (bara Sverige) när indexet inte ger något, när träffen är en socken eller kommun, " +
-	"eller när namnet inte är en namngiven lämning – så att orten själv (byn, tätorten) kommer med som egen kandidat. " +
+	"(t.ex. källor och stenar med namn), och i OpenStreetMap Nominatim (bara Sverige) för de flesta namn: när indexet inte ger något, när träffen är en socken eller kommun, " +
+	"eller när namnet inte är exakt en namngiven lämning – så att orten själv (byn, tätorten) kommer med som egen kandidat. " +
+	"OpenStreetMap-träffar utanför angivet län eller kommun tas bort. En ort och en socken med samma namn paras bara ihop när de ligger i samma kommun och län och nära varandra; " +
+	"annars visas de som skilda kandidater, var och en med kommun och län – fråga användaren vilken som avses när flera platser har namnet. " +
+	"Efter fel hos OpenStreetMap frågas tjänsten inte på en stund; svaret säger det. " +
 	"Varje kandidat säger vilken sorts punkt den är: \"mittpunkt för socknens/kommunens registrerade lämningar\" (en tyngdpunkt, ofta kilometer från kyrkbyn eller tätorten), " +
 	"\"ort enligt OpenStreetMap\" eller \"namngiven lämning\". Välj ortspunkten för \"nära orten\", områdets mittpunkt bara för området som helhet. " +
 	"Koordinaten kan skickas direkt till lamningar_nara. " +
@@ -392,15 +431,37 @@ export async function sokIndex(
 let ko = new Semaphore(1, { maxHoldMs: 20_000, maxWaitMs: 15_000, pollMs: 50 });
 let senasteAnrop = 0;
 
-/** Kör `fn` tidigast 1,1 s efter föregående Nominatim-anrop i isolatet. */
+/** Senaste Nominatim-anropet enligt KV (från vilket isolat som helst), eller 0. */
+async function senasteIKv(deps: HittaPlatsDeps): Promise<number> {
+	if (!deps.kv) return 0;
+	try {
+		const v = await deps.kv.get(NOMINATIM_SENASTE_KEY, "json");
+		return typeof v === "number" && Number.isFinite(v) ? v : 0;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * Kör `fn` tidigast 1,1 s efter föregående Nominatim-anrop, i isolatet och
+ * (via KV) i andra isolat. Tidpunkten skrivs till KV före anropet.
+ */
 async function iTur<T>(deps: HittaPlatsDeps, fn: () => Promise<T>): Promise<T> {
 	const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 	const now = deps.now ?? Date.now;
 	try {
 		return await ko.run(async () => {
-			const vanta = senasteAnrop + NOMINATIM_MIN_MELLANRUM_MS - now();
+			const senast = Math.max(senasteAnrop, await senasteIKv(deps));
+			const vanta = senast + NOMINATIM_MIN_MELLANRUM_MS - now();
 			if (vanta > 0) await sleep(Math.min(vanta, NOMINATIM_MIN_MELLANRUM_MS));
 			senasteAnrop = now();
+			if (deps.kv) {
+				try {
+					await deps.kv.put(NOMINATIM_SENASTE_KEY, JSON.stringify(senasteAnrop), { expirationTtl: 60 });
+				} catch {
+					// KV tillåter en skrivning per sekund och nyckel; isolatets egen kö gäller ändå.
+				}
+			}
 			return fn();
 		});
 	} catch (e) {
@@ -409,10 +470,82 @@ async function iTur<T>(deps: HittaPlatsDeps, fn: () => Promise<T>): Promise<T> {
 	}
 }
 
-/** Bara för test: nollställ kön. */
+/** Bara för test: nollställ kön och spärren i isolatet. */
 export function aterstallNominatimKo(): void {
 	ko = new Semaphore(1, { maxHoldMs: 20_000, maxWaitMs: 15_000, pollMs: 50 });
 	senasteAnrop = 0;
+	sparrLokal = null;
+}
+
+// ---------------------------------------------------------------- spärr efter fel
+
+export interface NominatimSparr {
+	/** Epoch-ms då spärren sattes och då den upphör. */
+	fran: number;
+	till: number;
+	orsak: string;
+}
+
+let sparrLokal: NominatimSparr | null = null;
+
+/** Nominatim frågades inte: tjänsten är spärrad efter ett fel. */
+export class NominatimSparrError extends UpstreamError {
+	constructor(readonly sparr: NominatimSparr) {
+		super("nominatim", `OpenStreetMap Nominatim frågades inte: spärrad till ${klockslag(sparr.till)} efter fel (${sparr.orsak})`);
+		this.name = "NominatimSparrError";
+	}
+}
+
+function klockslag(ms: number): string {
+	return `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+function arSparr(v: unknown): v is NominatimSparr {
+	const x = v as NominatimSparr | null;
+	return !!x && typeof x.fran === "number" && typeof x.till === "number" && typeof x.orsak === "string";
+}
+
+/** Gällande spärr (isolatets egen eller ur KV), eller null. */
+export async function lasNominatimSparr(deps: HittaPlatsDeps): Promise<NominatimSparr | null> {
+	const nu = (deps.now ?? Date.now)();
+	if (sparrLokal && sparrLokal.till > nu) return sparrLokal;
+	if (deps.kv) {
+		try {
+			const v = await deps.kv.get(NOMINATIM_SPARR_KEY, "json");
+			if (arSparr(v) && v.till > nu) {
+				sparrLokal = v;
+				return v;
+			}
+		} catch {
+			// Utan KV gäller isolatets spärr.
+		}
+	}
+	return null;
+}
+
+/** `Retry-After` i ms (sekunder eller HTTP-datum), eller 0. */
+export function retryAfterMs(h: string | null | undefined, nu: number): number {
+	if (!h) return 0;
+	const t = h.trim();
+	if (/^\d{1,9}$/.test(t)) return Number(t) * 1000;
+	const d = Date.parse(t);
+	return Number.isFinite(d) ? Math.max(0, d - nu) : 0;
+}
+
+async function sattNominatimSparr(deps: HittaPlatsDeps, orsak: string, retryAfter: string | null | undefined): Promise<NominatimSparr> {
+	const nu = (deps.now ?? Date.now)();
+	const ms = Math.min(NOMINATIM_SPARR_MAX_MS, Math.max(NOMINATIM_SPARR_MS, retryAfterMs(retryAfter, nu)));
+	const sp: NominatimSparr = { fran: nu, till: nu + ms, orsak };
+	sparrLokal = sp;
+	console.warn(`hitta_plats: OpenStreetMap Nominatim spärras till ${klockslag(sp.till)} (${orsak})`);
+	if (deps.kv) {
+		try {
+			await deps.kv.put(NOMINATIM_SPARR_KEY, JSON.stringify(sp), { expirationTtl: Math.max(60, Math.ceil(ms / 1000)) });
+		} catch (e) {
+			console.warn("hitta_plats: spärren kunde inte skrivas till KV:", e instanceof Error ? e.message : String(e));
+		}
+	}
+	return sp;
 }
 
 /** Bara för test: kön med egna gränser. */
@@ -440,7 +573,14 @@ export function nominatimFraga(namn: string, kommun: string | null, lan: string 
 	return parts.join(", ").slice(0, 200);
 }
 
-export function nominatimUrl(q: string): string {
+/** [minLon, minLat, maxLon, maxLat] → Nominatims viewbox ("x1,y1,x2,y2"). */
+export function viewbox(bb: readonly number[] | null | undefined): string | null {
+	if (!bb || bb.length !== 4 || !bb.every(Number.isFinite)) return null;
+	const m = 0.05;
+	return [bb[0] - m, bb[1] - m, bb[2] + m, bb[3] + m].map((x) => x.toFixed(4)).join(",");
+}
+
+export function nominatimUrl(q: string, vb?: string | null): string {
 	const u = new URL(NOMINATIM_URL);
 	u.searchParams.set("q", q);
 	u.searchParams.set("countrycodes", "se");
@@ -448,15 +588,16 @@ export function nominatimUrl(q: string): string {
 	u.searchParams.set("limit", "5");
 	u.searchParams.set("addressdetails", "1");
 	u.searchParams.set("accept-language", "sv");
+	if (vb) u.searchParams.set("viewbox", vb);
 	return u.href;
 }
 
-async function cacheKey(q: string): Promise<string> {
+async function cacheKey(q: string, vb: string | null): Promise<string> {
 	const b = await crypto.subtle.digest(
 		"SHA-256",
-		new TextEncoder().encode(q.toLocaleLowerCase("sv")),
+		new TextEncoder().encode(`${q.toLocaleLowerCase("sv")}|${vb ?? ""}`),
 	);
-	return `nominatim:v1:${[...new Uint8Array(b)]
+	return `nominatim:v2:${[...new Uint8Array(b)]
 		.map((x) => x.toString(16).padStart(2, "0"))
 		.join("")
 		.slice(0, 40)}`;
@@ -466,8 +607,9 @@ async function cacheKey(q: string): Promise<string> {
 export async function nominatim(
 	deps: HittaPlatsDeps,
 	q: string,
+	vb: string | null = null,
 ): Promise<{ traffar: NominatimTraff[]; cachad: boolean }> {
-	const key = await cacheKey(q);
+	const key = await cacheKey(q, vb);
 	if (deps.kv) {
 		try {
 			const hit = await deps.kv.get(key, "json");
@@ -479,9 +621,26 @@ export async function nominatim(
 			);
 		}
 	}
-	const url = nominatimUrl(q);
+	const sparr = await lasNominatimSparr(deps);
+	if (sparr) throw new NominatimSparrError(sparr);
+	const url = nominatimUrl(q, vb);
 	const source = checkAllowed("GET", url).source;
-	const r = await iTur(deps, () => deps.client.get(url));
+	const r = await iTur(deps, async () => {
+		try {
+			return await deps.client.get(url);
+		} catch (e) {
+			// Tidsgräns eller nätverksfel (klienten gör inget omförsök): spärra.
+			if (e instanceof UpstreamError) {
+				const sp = await sattNominatimSparr(deps, e.message, null);
+				throw new UpstreamError(source, `${e.message}; nästa fråga dit tidigast ${klockslag(sp.till)}`, e.status);
+			}
+			throw e;
+		}
+	});
+	if (r.status === 429 || r.status === 403 || r.status >= 500) {
+		const sp = await sattNominatimSparr(deps, `svarade ${r.status}`, r.retryAfter);
+		throw new UpstreamError(source, `OpenStreetMap Nominatim svarade ${r.status}; nästa fråga dit tidigast ${klockslag(sp.till)}`, r.status);
+	}
 	if (r.status >= 400)
 		throw new UpstreamError(source, `OpenStreetMap Nominatim svarade ${r.status}`, r.status);
 	let data: unknown;
@@ -575,6 +734,46 @@ export function behoverOrt(namn: string, kandidater: readonly Kandidat[]): boole
 	return !kandidater.some((k) => k.punkttyp === "namngiven_lamning" && v.has(k.namn));
 }
 
+/**
+ * Samma kommun? Nominatim ger kommunen som "Falu kommun", "Munkedals kommun",
+ * "Göteborgs Stad"; indexet som "Falun", "Munkedal", "Göteborg". Jämför utan
+ * "kommun"/"stad" och med genitiv-s eller Falu/Falun-formen.
+ */
+export function kommunLika(a: string | null, b: string | null): boolean {
+	if (!a || !b) return false;
+	const f = (x: string) => normalizeName(x).replace(/\s+(kommun|stad)$/, "");
+	const x = f(a);
+	const y = f(b);
+	return x === y || x === `${y}s` || y === `${x}s` || x === `${y}n` || y === `${x}n`;
+}
+
+/**
+ * Är orten (OpenStreetMap) rimligen samma plats som området (socken eller
+ * kommun ur indexet)? Kräver samma län och kommun när båda är kända, och att
+ * orten ligger inom områdets utbredning med SAMMA_PLATS_MARGINAL_KM marginal
+ * (utan utbredning: högst SAMMA_PLATS_MAX_KM från mittpunkten).
+ */
+export function sammaPlats(ort: Kandidat, omr: Kandidat): boolean {
+	if (ort.lan && omr.lan && ort.lan !== omr.lan) return false;
+	if (ort.kommun && omr.kommun && !kommunLika(ort.kommun, omr.kommun)) return false;
+	const bb = omr.utbredning;
+	if (bb && bb.length === 4) {
+		const dLat = SAMMA_PLATS_MARGINAL_KM / 111.2;
+		const dLon = SAMMA_PLATS_MARGINAL_KM / (111.2 * Math.cos((ort.lat * Math.PI) / 180));
+		return ort.lon >= bb[0] - dLon && ort.lon <= bb[2] + dLon && ort.lat >= bb[1] - dLat && ort.lat <= bb[3] + dLat;
+	}
+	return km(ort, omr) <= SAMMA_PLATS_MAX_KM;
+}
+
+/** "Mo (Munkedals kommun, Västra Götalands län)". */
+function medOmrade(k: Kandidat): string {
+	const delar = [
+		k.kommun ? (/(kommun|stad)$/i.test(k.kommun) ? k.kommun : `${k.kommun} kommun`) : null,
+		k.lan ? (findLan(k.lan)?.fullt ?? k.lan) : null,
+	].filter(Boolean);
+	return delar.length ? `${k.namn} (${delar.join(", ")})` : `${k.namn} (kommun och län okända)`;
+}
+
 function km(a: Kandidat, b: Kandidat): number {
 	return Math.hypot(a.sweref99tm.e - b.sweref99tm.e, a.sweref99tm.n - b.sweref99tm.n) / 1000;
 }
@@ -600,7 +799,7 @@ export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 	let franIndex: Kandidat[] = [];
 	let franOsm: Kandidat[] = [];
 	let indexSvarade = false;
-	let osm: "ej" | "nu" | "sparat" | "fel" = "ej";
+	let osm: "ej" | "nu" | "sparat" | "fel" | "sparr" = "ej";
 
 	if (deps.db) {
 		try {
@@ -621,9 +820,12 @@ export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 		}
 	} else anmarkningar.push("Indexet är inte inkopplat; sökte i OpenStreetMap.");
 
-	const omrade = franIndex.find((k) => k.punkttyp === "omradets_lamningar") ?? null;
+	const omraden = franIndex.filter((k) => k.punkttyp === "omradets_lamningar");
+	const omrade = omraden[0] ?? null;
+	let osmLage: "fragad" | "sparat_svar" | "behovdes_inte" | "avstangt" | "sparrad" | "fel" = "behovdes_inte";
 	if (behoverOrt(namn, franIndex)) {
 		if (!deps.nominatim) {
+			osmLage = "avstangt";
 			anmarkningar.push(
 				omrade
 					? `Uppslag i OpenStreetMap Nominatim är avstängt på den här servern, så orten ${namn} finns inte med som egen punkt. ${omrade.typ === "kommun" ? "Kommunens" : "Socknens"} punkt är mittpunkten för dess registrerade lämningar, inte orten.`
@@ -631,33 +833,70 @@ export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 			);
 		} else {
 			try {
-				const { traffar, cachad } = await nominatim(deps, nominatimFraga(namn, kommun, lan));
+				// Ett enda område i indexet: dess utbredning skickas som föredraget område (viewbox,
+				// utan bounded), så att orten där får företräde utan att andra orter utesluts.
+				const vb = omraden.length === 1 ? viewbox(omraden[0].utbredning) : null;
+				const { traffar, cachad } = await nominatim(deps, nominatimFraga(namn, kommun, lan), vb);
 				osm = cachad ? "sparat" : "nu";
-				franOsm = nominatimKandidater(traffar);
+				osmLage = cachad ? "sparat_svar" : "fragad";
+				const alla = nominatimKandidater(traffar);
+				// Bara träffar i angivet län och kommun (Nominatims fritext begränsar inte strikt).
+				franOsm = alla.filter((k) => (!lan || k.lan === lan) && (!kommun || kommunLika(k.kommun, kommun)));
+				const bort = alla.length - franOsm.length;
+				if (bort)
+					anmarkningar.push(`${bort} ${bort === 1 ? "träff" : "träffar"} i OpenStreetMap utanför ${[kommun ? `${kommun} kommun` : null, lan ? (findLan(lan)?.fullt ?? lan) : null].filter(Boolean).join(", ")} (eller utan känd kommun/län) togs bort.`);
 				if (franOsm.length) anmarkningar.push(`OpenStreetMap Nominatim${cachad ? " (sparat svar)" : ""}: ${NOMINATIM_ATTRIBUTION}.`);
 			} catch (e) {
 				if (!(e instanceof UpstreamError)) throw e;
-				osm = "fel";
-				anmarkningar.push(
-					`OpenStreetMap Nominatim gick inte att nå (${e.message}).${omrade ? ` Orten finns därför inte med som egen punkt; ${omrade.typ === "kommun" ? "kommunens" : "socknens"} punkt är mittpunkten för dess registrerade lämningar, inte orten.` : ""}`,
-				);
+				const inteOrten = omrade ? ` Orten finns därför inte med som egen punkt; ${omrade.typ === "kommun" ? "kommunens" : "socknens"} punkt är mittpunkten för dess registrerade lämningar, inte orten.` : "";
+				if (e instanceof NominatimSparrError) {
+					osm = "sparr";
+					osmLage = "sparrad";
+					anmarkningar.push(`OpenStreetMap Nominatim frågades inte: efter ett fel (${e.sparr.orsak}) ${klockslag(e.sparr.fran)} görs inga frågor dit förrän ${klockslag(e.sparr.till)}.${inteOrten}`);
+				} else {
+					osm = "fel";
+					osmLage = "fel";
+					anmarkningar.push(`OpenStreetMap Nominatim gick inte att nå (${e.message}).${inteOrten}`);
+				}
 			}
 		}
 	}
 
-	// Ordning: orter (OpenStreetMap) först när de finns, sedan indexets träffar, sist övriga platser i OpenStreetMap.
+	// Ort och område paras bara ihop när de rimligen är samma plats.
 	const orter = franOsm.filter((k) => k.punkttyp === "ort");
 	const ovriga = franOsm.filter((k) => k.punkttyp !== "ort");
-	const kandidater = [...orter, ...franIndex, ...ovriga].slice(0, MAX_KANDIDATER);
+	const par = orter.map((o) => ({ o, omr: omraden.find((a) => sammaPlats(o, a)) ?? null }));
+	const parade = par.filter((p) => p.omr).map((p) => p.o);
+	const oparade = par.filter((p) => !p.omr).map((p) => p.o);
+	// Ordning: orter som hör till ett område (eller alla orter när indexet inte har något
+	// område) först, sedan indexets träffar, sedan orter som inte hör till något område, sist
+	// övriga platser i OpenStreetMap.
+	const kandidater = (omraden.length ? [...parade, ...franIndex, ...oparade, ...ovriga] : [...orter, ...franIndex, ...ovriga]).slice(0, MAX_KANDIDATER);
 	const harIndex = kandidater.some((k) => k.kalla !== "OpenStreetMap Nominatim");
 	const harOsm = kandidater.some((k) => k.kalla === "OpenStreetMap Nominatim");
 	const kalla: "index" | "nominatim" | "index+nominatim" | "ingen" = harIndex && harOsm ? "index+nominatim" : harIndex ? "index" : harOsm ? "nominatim" : "ingen";
 
-	const ort = kandidater.find((k) => k.punkttyp === "ort") ?? null;
-	if (ort && omrade) {
+	const forsta = par.find((p) => p.omr && kandidater.includes(p.o));
+	if (forsta?.omr) {
+		const o = forsta.omr;
 		anmarkningar.unshift(
-			`Orten ${ort.namn} enligt OpenStreetMap ligger ${fmtKm(km(ort, omrade))} km från mittpunkten för ${omrade.typ === "kommun" ? "kommunens" : "socknens"} registrerade lämningar. Använd ortspunkten för "nära ${namn}"; områdets mittpunkt bara för området som helhet (radien behöver då täcka utbredningen).`,
+			`Orten ${forsta.o.namn} enligt OpenStreetMap ligger ${fmtKm(km(forsta.o, o))} km från mittpunkten för ${o.typ === "kommun" ? "kommunens" : "socknens"} registrerade lämningar (samma kommun och län). Använd ortspunkten för "nära ${namn}"; områdets mittpunkt bara för området som helhet (radien behöver då täcka utbredningen).`,
 		);
+	}
+	const visadeOparade = oparade.filter((k) => kandidater.includes(k));
+	if (omraden.length && visadeOparade.length) {
+		anmarkningar.push(
+			`${visadeOparade.map(medOmrade).join("; ")} enligt OpenStreetMap är inte samma plats som ${omraden.map((a) => `${a.typ === "kommun" ? "kommunen" : "socknen"} ${medOmrade(a)}`).join(" eller ")} i indexet (annan kommun eller annat län, eller för långt bort). De visas som skilda kandidater; ingen av dem rekommenderas.`,
+		);
+	}
+	// Flera platser med samma namn: modellen ska fråga användaren. En ort som hör till
+	// ett område räknas som samma plats som området.
+	const varianter = new Set(namnvarianter(namn));
+	const platser = kandidater.filter(
+		(k) => varianter.has(k.namn) && (k.punkttyp === "omradets_lamningar" || (k.punkttyp === "ort" && !parade.includes(k))),
+	);
+	if (platser.length > 1) {
+		anmarkningar.push(`Flera platser heter ${namn}: ${platser.map((k) => `${medOmrade(k)}, ${k.punkttyp === "ort" ? "ort" : k.typ}`).join("; ")}. Fråga användaren vilken som avses om sammanhanget inte avgör det.`);
 	}
 	if (!kandidater.length) {
 		anmarkningar.push(
@@ -676,7 +915,7 @@ export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 		}
 		delar.push(ixDatum ?? "index (datum okänt)");
 	}
-	if (osm !== "ej") delar.push(osm === "sparat" ? "OpenStreetMap sparat svar (högst 30 dygn)" : osm === "nu" ? "OpenStreetMap hämtat nu" : "OpenStreetMap svarade inte");
+	if (osm !== "ej") delar.push(osm === "sparat" ? "OpenStreetMap sparat svar (högst 30 dygn)" : osm === "nu" ? "OpenStreetMap hämtat nu" : osm === "sparr" ? "OpenStreetMap frågades inte (spärrad efter fel)" : "OpenStreetMap svarade inte");
 	const hamtad_fran = delar.join("; ") || "inget uppslag gjordes";
 	const kallaText =
 		kalla === "index+nominatim"
@@ -685,9 +924,9 @@ export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 				? "serverns lämningsindex"
 				: kalla === "nominatim"
 					? "OpenStreetMap Nominatim"
-					: [indexSvarade ? "serverns lämningsindex" : null, osm !== "ej" ? "OpenStreetMap Nominatim" : null].filter(Boolean).join(" och ") || "ingen källa kunde frågas";
+					: [indexSvarade ? "serverns lämningsindex" : null, osm !== "ej" && osm !== "sparr" ? "OpenStreetMap Nominatim" : null].filter(Boolean).join(" och ") || "ingen källa kunde frågas";
 
-	const structured = { namn, kommun, lan, kalla, hamtad_fran, kandidater, anmarkningar };
+	const structured = { namn, kommun, lan, kalla, openstreetmap: osmLage, hamtad_fran, kandidater, anmarkningar };
 	const lines: string[] = [];
 	const avgr = [kommun ? `kommun ${kommun}` : null, lan ? `län ${lan}` : null]
 		.filter(Boolean)

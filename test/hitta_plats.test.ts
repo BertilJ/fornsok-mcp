@@ -227,7 +227,7 @@ describe("hitta_plats", () => {
 		const t = (res.content[0] as { text: string }).text;
 		expect(t).toContain("1. «Bjursås» – ort enligt OpenStreetMap (place/village), Falu kommun, Dalarnas län: 60.73777, 15.45111.");
 		expect(t).toContain("2. «Bjursås» – mittpunkt för socknens registrerade lämningar (1 lämning) – inte orten, Falun kommun, Dalarnas län: 60.73368");
-		expect(t).toMatch(/Orten Bjursås enligt OpenStreetMap ligger [\d,]+ km från mittpunkten för socknens registrerade lämningar\. Använd ortspunkten för "nära Bjursås"/);
+		expect(t).toMatch(/Orten Bjursås enligt OpenStreetMap ligger [\d,]+ km från mittpunkten för socknens registrerade lämningar \(samma kommun och län\)\. Använd ortspunkten för "nära Bjursås"/);
 		expect(t).toMatch(/^Källa: serverns lämningsindex och OpenStreetMap Nominatim; index \(datum okänt\); OpenStreetMap hämtat nu\.$/m);
 		expect(r.hamtad_fran).toBe("index (datum okänt); OpenStreetMap hämtat nu");
 	});
@@ -283,9 +283,10 @@ describe("hitta_plats", () => {
 		expect(
 			structured(await hittaPlats({ namn: "Bjursås", lan: "Dalarnas län" }, deps)).kalla,
 		).toBe("index+nominatim");
-		// Bjursås ligger inte i Jämtland: inget i indexet → Nominatim.
+		// Bjursås ligger inte i Jämtland: inget i indexet → Nominatim, vars träffar (i Dalarna) tas bort.
 		const r = structured(await hittaPlats({ namn: "Bjursås", lan: "Jämtland" }, deps));
-		expect(r.kalla).toBe("nominatim");
+		expect(r.kalla).toBe("ingen");
+		expect(r.anmarkningar.join(" ")).toMatch(/2 träffar i OpenStreetMap utanför Jämtlands län .*togs bort/);
 		expect(nom.calls[1].url.searchParams.get("q")).toBe("Bjursås, Jämtlands län");
 		await expect(hittaPlats({ namn: "Bjursås", lan: "Atlantis" }, deps)).rejects.toThrow(
 			/Okänt län/,
@@ -320,7 +321,7 @@ describe("hitta_plats", () => {
 			"accept-language": "sv",
 		});
 		expect(nom.calls[0].ua).toBe("fornsok-mcp/0.1 (+https://example.org/kontakt)");
-		expect([...kv.data.values()][0].ttl).toBe(NOMINATIM_TTL_S);
+		expect([...kv.data.entries()].find(([k]) => k.startsWith("nominatim:v2:"))?.[1].ttl).toBe(NOMINATIM_TTL_S);
 		expect(res.content[0]).toMatchObject({ type: "text" });
 		expect((res.content[0] as { text: string }).text).toMatch(/lamningar_nara/);
 
@@ -437,6 +438,157 @@ describe("hitta_plats", () => {
 		} finally {
 			await client.close();
 		}
+	});
+
+	// ------------------------------------------------ Nominatims villkor: inga omförsök, spärr efter fel
+
+	function statusFetch(svar: () => Response) {
+		const calls: number[] = [];
+		const fetch: FetchLike = async () => {
+			calls.push(clock);
+			return svar();
+		};
+		return { fetch, calls };
+	}
+	const medFetch = (f: FetchLike): HittaPlatsDeps => ({ ...createHittaPlatsDeps({ db: openD1(db), kv, fetch: f }), sleep: deps.sleep, now: deps.now });
+
+	it("429 från Nominatim: inget omförsök, spärr i 10 minuter (även i ett annat isolat via KV), svaret säger att OpenStreetMap inte frågades", async () => {
+		const f = statusFetch(() => json({ error: "för många" }, 429));
+		const d = medFetch(f.fetch);
+		const r1 = structured(await hittaPlats({ namn: "Kopparvågen" }, d));
+		expect(f.calls).toHaveLength(1);
+		expect(r1.openstreetmap).toBe("fel");
+		expect(r1.anmarkningar.join(" ")).toMatch(/svarade 429; nästa fråga dit tidigast/);
+		// Andra namn, samma isolat: inget anrop.
+		clock += 60_000;
+		const r2 = await hittaPlats({ namn: "Bjursås" }, d);
+		expect(f.calls).toHaveLength(1);
+		expect(structured(r2).openstreetmap).toBe("sparrad");
+		expect(structured(r2).anmarkningar.join(" ")).toMatch(/OpenStreetMap Nominatim frågades inte: efter ett fel \(svarade 429\)/);
+		expect((r2.content[0] as { text: string }).text).toMatch(/OpenStreetMap frågades inte \(spärrad efter fel\)/);
+		// Ett nytt isolat (isolatets minne nollställt) läser spärren ur KV.
+		aterstallNominatimKo();
+		await hittaPlats({ namn: "Stora Stöten" }, d);
+		expect(f.calls).toHaveLength(1);
+		expect(kv.data.get("nominatim:sparr:v1")?.ttl).toBe(600);
+		// Efter tio minuter: frågas igen.
+		clock += 10 * 60_000;
+		const ok = medFetch(nom.fetch);
+		expect(structured(await hittaPlats({ namn: "Falu gruva" }, ok)).openstreetmap).toBe("fragad");
+	});
+
+	it("Retry-After längre än 10 minuter förlänger spärren; 5xx, 403 och tidsgräns spärrar också, utan omförsök", async () => {
+		const f = statusFetch(() => new Response("", { status: 429, headers: { "retry-after": "1800" } }));
+		await hittaPlats({ namn: "Kopparvågen" }, medFetch(f.fetch));
+		expect(kv.data.get("nominatim:sparr:v1")?.ttl).toBe(1800);
+		for (const svar of [() => json({}, 503), () => json({}, 403), () => { throw Object.assign(new Error("timeout"), { name: "TimeoutError" }); }]) {
+			aterstallNominatimKo();
+			kv.data.clear();
+			const g = statusFetch(svar as () => Response);
+			const r = structured(await hittaPlats({ namn: "Kopparvågen" }, medFetch(g.fetch)));
+			expect(g.calls).toHaveLength(1);
+			expect(r.openstreetmap).toBe("fel");
+			expect(kv.data.has("nominatim:sparr:v1")).toBe(true);
+		}
+	});
+
+	it("klienten för Nominatim gör inga omförsök (två anrop med 821 ms mellanrum vid 429 i granskningen)", async () => {
+		const tider: number[] = [];
+		const f: FetchLike = async () => {
+			tider.push(Date.now());
+			return json({}, 429);
+		};
+		const d = createHittaPlatsDeps({ fetch: f });
+		const r = await d.client.get("https://nominatim.openstreetmap.org/search?q=x&countrycodes=se&format=jsonv2");
+		expect(r.status).toBe(429);
+		expect(tider).toHaveLength(1);
+	});
+
+	it("mellanrummet på 1,1 s hålls mot ett anrop från ett annat isolat (tidpunkt i KV)", async () => {
+		await kv.put("nominatim:senaste:v1", JSON.stringify(clock - 300));
+		await hittaPlats({ namn: "Falu gruva" }, deps);
+		expect(sleeps).toEqual([800]);
+		expect(await kv.get("nominatim:senaste:v1")).toBe(clock);
+	});
+
+	// ------------------------------------------------ samma namn på flera platser (granskningens Mo-fall)
+
+	const MO_MUNKEDAL = { lat: "58.4700", lon: "11.6800", category: "place", type: "village", name: "Mo", display_name: "Mo, Munkedals kommun, Västra Götalands län, Sverige", address: { village: "Mo", municipality: "Munkedals kommun", county: "Västra Götalands län" } };
+	const MO_LJUSDAL = { lat: "61.8600", lon: "16.1200", category: "place", type: "village", name: "Mo", display_name: "Mo, Ljusdals kommun, Gävleborgs län, Sverige", address: { village: "Mo", municipality: "Ljusdals kommun", county: "Gävleborgs län" } };
+	function moSocken(): void {
+		const ins = (niva: string, namn: string) => {
+			db.prepare("INSERT OR IGNORE INTO omrade (niva, namn, lan) VALUES (?, ?, '')").run(niva, namn);
+			return (db.prepare("SELECT id FROM omrade WHERE niva = ? AND namn = ? AND lan = ''").get(niva, namn) as { id: number }).id;
+		};
+		const mo = ins("socken", "Mo");
+		const lj = ins("kommun", "Ljusdal");
+		const gv = ins("lan", "Gävleborg");
+		db.prepare("INSERT INTO omrade_sammanfattning (omrade_id, antal, med_lage, lat, lon, min_lat, min_lon, max_lat, max_lon) VALUES (?, 120, 120, 61.85, 16.10, 61.75, 15.95, 61.95, 16.25)").run(mo);
+		db.prepare("INSERT INTO omrade_relation (omrade_id, overordnad_id, antal) VALUES (?, ?, 120), (?, ?, 120)").run(mo, lj, mo, gv);
+	}
+	function moFetch(traffar: unknown[]) {
+		const calls: URL[] = [];
+		const fetch: FetchLike = async (input) => {
+			calls.push(new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url));
+			return json(traffar, 200, "application/json; charset=utf-8");
+		};
+		return { fetch, calls };
+	}
+
+	it("Mo i Gävleborg: indexet ger socknen i Ljusdal, OpenStreetMap Mo i Munkedal – Munkedal tas bort, ingen rekommendation mot fel ort", async () => {
+		moSocken();
+		const f = moFetch([MO_MUNKEDAL]);
+		const res = await hittaPlats({ namn: "Mo", lan: "Gävleborg" }, medFetch(f.fetch));
+		const r = structured(res);
+		expect(r.kandidater.map((k: S) => [k.namn, k.punkttyp, k.lan])).toEqual([["Mo", "omradets_lamningar", "Gävleborg"]]);
+		const t = (res.content[0] as { text: string }).text;
+		expect(t).not.toMatch(/Munkedal.*Använd ortspunkten|Använd ortspunkten/);
+		expect(t).toMatch(/1 träff i OpenStreetMap utanför Gävleborgs län .*togs bort/);
+		// Socknens utbredning skickas som föredraget område.
+		expect(f.calls[0].searchParams.get("viewbox")).toBe("15.9000,61.7000,16.3000,62.0000");
+		expect(f.calls[0].searchParams.get("q")).toBe("Mo, Gävleborgs län");
+	});
+
+	it("Mo utan län: orten i Munkedal och socknen i Ljusdal visas som skilda kandidater med kommun och län, utan rekommendation", async () => {
+		moSocken();
+		const res = await hittaPlats({ namn: "Mo" }, medFetch(moFetch([MO_MUNKEDAL]).fetch));
+		const r = structured(res);
+		expect(r.kandidater.map((k: S) => [k.punkttyp, k.kommun, k.lan])).toEqual([
+			["omradets_lamningar", "Ljusdal", "Gävleborg"],
+			["ort", "Munkedals kommun", "Västra Götaland"],
+		]);
+		const t = (res.content[0] as { text: string }).text;
+		expect(t).not.toMatch(/Använd ortspunkten/);
+		expect(t).toMatch(/Mo \(Munkedals kommun, Västra Götalands län\) enligt OpenStreetMap är inte samma plats som socknen Mo \(Ljusdal kommun, Gävleborgs län\)/);
+		expect(t).toMatch(/Flera platser heter Mo: .*Fråga användaren vilken som avses/);
+	});
+
+	it("Mo i Gävleborg när OpenStreetMap har båda: orten i Ljusdal paras med socknen och rekommenderas, Munkedal tas bort", async () => {
+		moSocken();
+		const res = await hittaPlats({ namn: "Mo", lan: "Gävleborg" }, medFetch(moFetch([MO_MUNKEDAL, MO_LJUSDAL]).fetch));
+		const r = structured(res);
+		expect(r.kandidater.map((k: S) => [k.punkttyp, k.lan])).toEqual([["ort", "Gävleborg"], ["omradets_lamningar", "Gävleborg"]]);
+		const t = (res.content[0] as { text: string }).text;
+		expect(t).toMatch(/Orten Mo enligt OpenStreetMap ligger [\d,]+ km från mittpunkten för socknens registrerade lämningar \(samma kommun och län\)/);
+		expect(t).not.toMatch(/Flera platser heter/);
+	});
+
+	it("samma kommun men för långt bort: ingen ihopparning", async () => {
+		moSocken();
+		const langt = { ...MO_LJUSDAL, lat: "62.3000", lon: "15.2000" };
+		const t = ((await hittaPlats({ namn: "Mo" }, medFetch(moFetch([langt]).fetch))).content[0] as { text: string }).text;
+		expect(t).not.toMatch(/Använd ortspunkten/);
+		expect(t).toMatch(/är inte samma plats/);
+	});
+
+	it("kommunLika: Nominatims kommunform mot indexets", async () => {
+		const { kommunLika } = await import("../src/tools/hitta_plats");
+		expect(kommunLika("Falu kommun", "Falun")).toBe(true);
+		expect(kommunLika("Munkedals kommun", "Munkedal")).toBe(true);
+		expect(kommunLika("Göteborgs Stad", "Göteborg")).toBe(true);
+		expect(kommunLika("Mora kommun", "Mora")).toBe(true);
+		expect(kommunLika("Munkedals kommun", "Ljusdal")).toBe(false);
+		expect(kommunLika(null, "Ljusdal")).toBe(false);
 	});
 
 	it("listan över tillåtna anrop: bara sökning i Sverige med kända parametrar", () => {

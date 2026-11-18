@@ -452,3 +452,55 @@ describe("svarskroppens gräns (granskningen av verktygsskiktet, punkt 7)", () =
 		expect(MAX_BODY_BYTES).toBe(8 * 1024 * 1024);
 	});
 });
+
+// ---------------------------------------------------------------- granskningen av f4d4244, punkt 8d, 8f och 9
+
+describe("granskningen av f4d4244: övrigt", () => {
+	it("8d: uppslag i indexreserven säger att listorna är byggda ur indexet och anger indexets datum, inte dagens", async () => {
+		const { uppslag } = await import("../src/tools/uppslag");
+		const d: Domaner = { lamningstyper: [], kategorier: [], bedomningar: [], kommuner: [{ kod: "2080", namn: "Falun", lan_kod: "20", lan_namn: "Dalarna" }] as Domaner["kommuner"], socknar: [], landskap: [], lan: [], hamtad: new Date().toISOString(), kalla: "index" };
+		const deps = { domains: { get: async () => d }, index: { open: async () => ({ ok: true, hamtad_fran: "index 2026-11-17" }) } } as unknown as Parameters<typeof uppslag>[1];
+		const r = await uppslag({ lista: "kommuner" } as Parameters<typeof uppslag>[0], deps);
+		const t = (r.content[0] as { text: string }).text;
+		expect(t).toMatch(/listorna byggda ur indexet \(index 2026-11-17\)\.$/m);
+		expect(t).not.toMatch(/listorna hämtade/);
+		const utan = await uppslag({ lista: "kommuner" } as Parameters<typeof uppslag>[0], { domains: deps.domains } as unknown as Parameters<typeof uppslag>[1]);
+		expect((utan.content[0] as { text: string }).text).toMatch(/listorna byggda ur indexet \(indexets datum okänt\)/);
+	});
+
+	it("8f: vokaliserad hebreiska (fem kombinerande tecken i följd) klipps inte; NFC igen efter att osynliga tecken tagits bort", async () => {
+		const { rensaRad, MAX_KOMBINERANDE } = await import("../src/extern_text");
+		// Bokstaven shin med shin-punkt, dagesh, qamats, meteg och kantillationstecken: fem i följd.
+		const hebreiska = "שָּֽׁ֑ל";
+		expect(rensaRad(hebreiska)).toBe(hebreiska.normalize("NFC"));
+		expect(MAX_KOMBINERANDE).toBeGreaterThanOrEqual(5);
+		// a + nollbreddsblanksteg + trema: blir ä, inte a + lös diakrit.
+		expect(rensaRad("a​̈")).toBe("ä");
+		expect(rensaRad("Bjursa​̊s")).toBe("Bjursås");
+	});
+
+	it("9: bakgrundskontexten blandas inte ihop mellan två samtidiga förfrågningar", async () => {
+		const { iBakgrunden, medBakgrund } = await import("../src/bakgrund");
+		const a: Array<Promise<unknown>> = [];
+		const b: Array<Promise<unknown>> = [];
+		const vanta = (ms: number) => new Promise((r) => setTimeout(r, ms));
+		await Promise.all([
+			medBakgrund({ waitUntil: (p) => a.push(p) }, async () => {
+				await vanta(10);
+				iBakgrunden(Promise.resolve("a1"));
+				await vanta(10);
+				iBakgrunden(Promise.resolve("a2"));
+			}),
+			medBakgrund({ waitUntil: (p) => b.push(p) }, async () => {
+				await vanta(5);
+				iBakgrunden(Promise.resolve("b1"));
+				await vanta(20);
+				iBakgrunden(Promise.resolve("b2"));
+				iBakgrunden(Promise.resolve("b3"));
+			}),
+		]);
+		expect(a).toHaveLength(2);
+		expect(b).toHaveLength(3);
+		expect(iBakgrunden(Promise.resolve())).toBe(false);
+	});
+});

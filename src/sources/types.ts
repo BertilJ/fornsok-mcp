@@ -424,12 +424,20 @@ export interface RelateratBild {
 /** Ett objekt som K-samsök knyter till lämningen (eller till en äldre FMI-post som lämningen ersätter). */
 export interface RelateratObjekt {
 	slag: RelateratSlag;
-	/** Relationstypen enligt getRelations (t.ex. isVisualizedBy), eller null när den inte är känd. */
+	/**
+	 * Relationstypen enligt getRelations (t.ex. isVisualizedBy), bara om den står i
+	 * den fasta listan över kända typer (ksamsok/relationstyper.ts); annars null.
+	 */
 	relationstyp: string | null;
+	/** true när getRelations gav en relationstyp som inte står i listan (visas som "okänd relation"). */
+	relationstyp_okand?: boolean;
 	/** true när relationen står hos det andra objektet (getRelations: source="deduced"). */
 	harledd: boolean | null;
-	/** Vad objektet är kopplat till: lämningen, eller URI:n för en äldre FMI-post som lämningen ersätter. */
-	kopplad_till: string;
+	/**
+	 * Vad objektet är kopplat till: lämningen, URI:n för en äldre FMI-post som
+	 * lämningen ersätter, eller null när kopplingen inte framgår av K-samsöks svar.
+	 */
+	kopplad_till: string | null;
 	uri: string;
 	/** pres:type, t.ex. "Foto", "Ritning", "Dokument" */
 	typ: string | null;
@@ -449,6 +457,12 @@ export interface RelateratObjekt {
 	bilder: RelateratBild[];
 	/** false när K-samsök inte hade några uppgifter om objektet (bara relationen är känd). */
 	uppgifter: boolean;
+	/**
+	 * false när objektet inte slogs upp i K-samsök (för många, eller uppslaget
+	 * misslyckades): då är bara relation och adress kända, och slaget är härlett
+	 * ur relationstypen.
+	 */
+	uppslagen: boolean;
 }
 
 export interface RelateratLista {
@@ -465,6 +479,8 @@ export interface RelateratLista {
 	/** true när en del av hämtningen misslyckades (listan cachas då inte). */
 	delvis_fel: boolean;
 	anmarkningar: string[];
+	/** Sätts av KV-lagret när svaret kom ur cachen (sparas inte). */
+	sparad?: boolean;
 }
 
 export interface RelationSource {
@@ -478,6 +494,13 @@ export interface RelateratSammanfattning {
 	antal_per_slag: Record<string, number>;
 	forsta: RelateratObjekt[];
 	ofullstandig: boolean;
+	/** Objekt utan uppgifter ur K-samsök (bara relation och adress). */
+	utan_uppgifter: number;
+	/** Varav objekt som inte slogs upp alls (slaget härlett ur relationstypen). */
+	ej_uppslagna: number;
+	/** true när en del av hämtningen misslyckades. */
+	delvis_fel: boolean;
+	anmarkningar: string[];
 	kalla: string;
 	hamtad_fran: string;
 }

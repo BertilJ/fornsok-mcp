@@ -6,7 +6,8 @@
  * material ur K-samsök. Varje lyckat svar ska ha en källrad ("Källa: …; …").
  * Med --index frågar hitta_plats också OpenStreetMap Nominatim en gång
  * (Bjursås: socknen ur indexet och orten ur OpenStreetMap), om inte servern
- * har NOMINATIM="av".
+ * har NOMINATIM="av" eller Nominatim är spärrat efter ett fel (då säger svaret
+ * att OpenStreetMap inte frågades).
  *
  *   node scripts/smoke.mjs [http://localhost:8787/mcp]
  *       Lokalt med utvecklingsläget på (ACCESS_DEV_BYPASS="true" i .dev.vars).
@@ -203,9 +204,14 @@ check(typeof u.structuredContent?.hamtad_fran === "string", `uppslag: hamtad_fra
 const rel = await call("relaterat", { id: "Bjursås 27:1" });
 const rs = rel.structuredContent ?? {};
 check(!rel.isError && rs.lamning?.uuid === "adc490ba-871a-45bd-8e3d-0a27761b3b6c" && (rs.antal_per_slag?.arkivhandling ?? 0) >= 1, `relaterat: Bjursås 27:1 (${JSON.stringify(rs.antal_per_slag)})`);
-check((rs.objekt ?? []).every((o) => o.slag && o.uri && "bilder" in o), "relaterat: varje objekt har slag, uri och bildfält");
+check((rs.objekt ?? []).every((o) => o.slag && o.uri && "bilder" in o && typeof o.uppslagen === "boolean"), "relaterat: varje objekt har slag, uri, bildfält och uppslagen");
+check(typeof rs.utan_uppgifter === "number" && typeof rs.ej_uppslagna === "number" && typeof rs.delvis_fel === "boolean", `relaterat: utan_uppgifter ${rs.utan_uppgifter}, ej_uppslagna ${rs.ej_uppslagna}, delvis_fel ${rs.delvis_fel}`);
+const relText = (rel.content ?? []).map((c) => c.text ?? "").join("\n");
+check(!/RAÄ:s bildvisning/.test(relText) && relText.split("\n").filter((r) => /^\s+Sida: /.test(r)).every((r) => / \([a-z0-9.-]+\)$|okänd värd/.test(r)), "relaterat: värden står vid varje länk, inga påståenden om vart länkarna går");
 const relFilter = await call("relaterat", { id: "L2001:646", slag: ["äldre post"] });
 check(!relFilter.isError && (relFilter.structuredContent?.objekt ?? []).every((o) => o.slag === "äldre post"), "relaterat: filter på slag");
+const relOkand = await client.callTool({ name: "relaterat", arguments: { id: "00000000-0000-4000-8000-000000000000" } });
+check(relOkand.isError === true && /Ingen lämning med UUID/.test(relOkand.content?.[0]?.text ?? ""), "relaterat: okänt UUID ger fel (inget frågas i K-samsök, inget sparas)");
 
 // Semantisk sökning. Läget upptäcks ur serverns svar: "auto" inom omfånget ger
 // sokkanaler ["ord","betydelse"] när kanalen är ansluten, annars ["ord"].
@@ -245,8 +251,9 @@ if (medIndex) {
 	const kand = hs.kandidater ?? [];
 	check(!hp.isError && kand.some((k) => k.typ === "socken" && k.punkttyp === "omradets_lamningar"), `hitta_plats: socknen Bjursås ur indexet, märkt som mittpunkt för lämningarna (${hs.kalla})`);
 	check(kand.every((k) => typeof k.punkt === "string" && k.punkt.length > 0), "hitta_plats: varje kandidat säger vilken sorts punkt den är");
-	if (hs.kalla === "index+nominatim") check(kand[0]?.punkttyp === "ort", "hitta_plats: orten ur OpenStreetMap först");
-	else check(/avstängt|gick inte att nå/.test((hs.anmarkningar ?? []).join(" ")), "hitta_plats: utan OpenStreetMap säger svaret varför orten saknas");
+	check(["fragad", "sparat_svar", "avstangt", "sparrad", "fel", "behovdes_inte"].includes(hs.openstreetmap), `hitta_plats: openstreetmap = ${hs.openstreetmap}`);
+	if (hs.kalla === "index+nominatim") check(kand[0]?.punkttyp === "ort", "hitta_plats: orten ur OpenStreetMap först (samma kommun och län som socknen)");
+	else check(/avstängt|gick inte att nå|frågades inte/.test((hs.anmarkningar ?? []).join(" ")), "hitta_plats: utan OpenStreetMap säger svaret varför orten saknas");
 }
 
 await client.close();

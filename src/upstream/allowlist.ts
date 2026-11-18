@@ -174,6 +174,8 @@ export const ALLOWED_CALLS: readonly AllowedCall[] = [
 			limit: /^(?:[1-9]|10)$/,
 			addressdetails: /^[01]$/,
 			"accept-language": /^sv$/,
+			// Föredraget område (utan bounded): ger träffar där företräde, utesluter inga andra.
+			viewbox: /^-?\d{1,3}(?:\.\d{1,6})?(?:,-?\d{1,3}(?:\.\d{1,6})?){3}$/,
 		},
 		requiredQuery: ["q", "countrycodes", "format"],
 	},

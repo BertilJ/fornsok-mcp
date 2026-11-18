@@ -10,8 +10,15 @@
  *    tas bort).
  *
  * Fel i Workers AI: tillfälliga fel (arTillfalligtAiFel) prövas nästa körning
- * utan att räknas; fel på en enskild text bokförs i inbaddning_fel, och efter
- * MAX_FEL_PER_POST försök med samma radhash hoppas lämningen över.
+ * utan att räknas. Ett fel på en enskild text går inte att skilja från ett
+ * avbrott när alla texter i körningen fallerar, så ett fel bokförs som textens
+ * (i inbaddning_fel, med belägget i senaste_fel) bara när en annan text i samma
+ * körning lyckats, eller när felet entydigt gäller indata (arIndatafel).
+ * Fallerar ett anrop innan något lyckats prövas en kontrolltext (KONTROLLTEXT);
+ * fallerar även den är det ett avbrott: körningen avbryts, inget bokförs, inget
+ * försök förbrukas och omfånget räknas inte som klart. Efter MAX_FEL_PER_POST försök
+ * med samma radhash hoppas lämningen över i OMPROVNING_DYGN dygn och prövas
+ * sedan igen (ett försök i taget).
  *
  * För varje lämning byggs texten (text.ts) och metadata (filter.ts); är de
  * oförändrade (`innehall_hash`) bäddas inget in, bara `rad_hash` uppdateras.
@@ -37,8 +44,22 @@ export const UPSERT_BATCH = 500;
 export const STANDARD_MAX = 1000;
 /** Så många försök med samma radhash innan en lämning hoppas över. */
 export const MAX_FEL_PER_POST = 3;
-/** Så många misslyckade anrop till Workers AI per körning innan körningen ger upp (tjänsten är nere). */
+/** Så många misslyckade anrop till Workers AI, utan något lyckat anrop i körningen, innan körningen ger upp (tjänsten är nere). */
 export const MAX_AI_FEL_PER_KORNING = 12;
+/** Övre gräns för misslyckade anrop i en körning även när andra anrop lyckats (skyddar kvoten). */
+export const MAX_AI_FEL_TOTALT = 48;
+/** En överhoppad lämning prövas igen efter så många dygn, även om raden inte ändrats. */
+export const OMPROVNING_DYGN = 7;
+/** Prefix i inbaddning_fel.senaste_fel som anger varför felet räknades som textens. */
+export const BELAGG_ANNAN_LYCKADES = "belägg: annan text i körningen lyckades; ";
+export const BELAGG_INDATAFEL = "belägg: indatafel; ";
+/** Kontrolltext som prövas när ett anrop fallerar innan något lyckats i körningen. */
+export const KONTROLLTEXT = "Fornlämning. Röse av sten.";
+/** Engångsrensningen av överhoppningar utan belägg (bokförda före BELAGG_*). */
+const RENSNING_NYCKEL = "inbaddning_fel_rensad";
+const RENSNING_VERSION = "1";
+/** Höjs när logiken för vad som räknas som klart ändras, så att omfånget gås igenom igen. */
+const KLAR_VERSION = 2;
 
 /**
  * Felkoder i Workers AI som betyder att tjänsten (inte texten) är problemet
@@ -73,6 +94,25 @@ export function arTillfalligtAiFel(e: unknown): boolean {
 	if (kod) return TILLFALLIGA_AI_KODER.has(kod);
 	if (/^Network connection lost\.?$/i.test(msg.trim())) return true;
 	return HTTP_FRAS.test(msg);
+}
+
+/**
+ * Workers AI:s felkoder och HTTP-statusar som entydigt gäller indata, oavsett
+ * om andra texter lyckats: 3006 Request too large (413). Ett anrop med en enda
+ * text som är för stort beror bara på texten. 5004 Invalid data och 400 räknas
+ * inte hit: de kan lika gärna gälla anropets form (t.ex. en ändrad modell) och
+ * skulle då förbruka försök för alla texter.
+ */
+export const INDATA_AI_KODER = new Set(["3006"]);
+
+/** Fel som entydigt gäller texten i anropet (se INDATA_AI_KODER). */
+export function arIndatafel(e: unknown): boolean {
+	const st = (e as { status?: unknown } | null)?.status;
+	if (typeof st === "number") return st === 413;
+	const msg = e instanceof Error ? e.message : String(e);
+	const kod = AI_KOD.exec(msg)?.[1];
+	if (kod) return INDATA_AI_KODER.has(kod);
+	return /(?:^|[\s:(])413 (?:Payload|Request Entity) Too Large\b/i.test(msg);
 }
 
 export interface EmbedResult {
@@ -185,7 +225,10 @@ export async function runEmbedBatch(
 		throw e;
 	}
 	const max = Math.max(1, Math.min(10_000, opts.max ?? STANDARD_MAX));
-	const tid = (opts.now ?? new Date()).toISOString();
+	const nu = opts.now ?? new Date();
+	const tid = nu.toISOString();
+	/** Överhoppningar bokförda före denna tid prövas igen. */
+	const omprovas = new Date(nu.getTime() - OMPROVNING_DYGN * 86_400_000).toISOString();
 	const scopeJson = JSON.stringify(scope.lan);
 	const res: EmbedResult = {
 		inbaddade: 0,
@@ -203,14 +246,31 @@ export async function runEmbedBatch(
 	// av hela omfånget; nattsynkens ändringar kommer via inbaddning_ko.
 	const st = await rows<{ nyckel: string; varde: string | null }>(
 		db,
-		"SELECT nyckel, varde FROM synk_status WHERE nyckel IN ('senaste_grundladdning', 'senaste_avstamning', 'inbaddning_klar')",
+		`SELECT nyckel, varde FROM synk_status WHERE nyckel IN ('senaste_grundladdning', 'senaste_avstamning', 'inbaddning_klar', '${RENSNING_NYCKEL}')`,
 	);
 	const stv = new Map(st.map((r) => [r.nyckel, r.varde]));
-	const signatur = JSON.stringify({ g: stv.get("senaste_grundladdning") ?? null, a: stv.get("senaste_avstamning") ?? null, omfang: scope.lan, modell: MODELL });
+	if (stv.get(RENSNING_NYCKEL) !== RENSNING_VERSION) {
+		await rensaOverhoppningarUtanBelagg(db, tid);
+		stv.delete("inbaddning_klar");
+	}
+	const signatur = JSON.stringify({ v: KLAR_VERSION, g: stv.get("senaste_grundladdning") ?? null, a: stv.get("senaste_avstamning") ?? null, omfang: scope.lan, modell: MODELL });
 	const [ko0] = await rows<{ n: number }>(db, "SELECT count(*) AS n FROM inbaddning_ko");
 	if (Number(ko0?.n ?? 0) === 0 && stv.get("inbaddning_klar") === signatur) {
-		res.klar = true;
-		return res;
+		// Klart, utom överhoppade lämningar vars väntetid gått ut: de söks fram nedan.
+		const [due] = await rows<{ n: number }>(
+			db,
+			`SELECT count(*) AS n FROM (SELECT 1 FROM inbaddning_fel f JOIN lamning l ON l.uuid = f.uuid AND l.hash = f.rad_hash
+			  WHERE f.forsok >= ? AND f.andrad <= ? AND l.id IN (${SCOPE_IDS})
+			    AND NOT EXISTS (SELECT 1 FROM inbaddning i WHERE i.uuid = f.uuid AND i.rad_hash = f.rad_hash AND i.modell = ?) LIMIT 1)`,
+			MAX_FEL_PER_POST,
+			omprovas,
+			scopeJson,
+			MODELL,
+		);
+		if (Number(due?.n ?? 0) === 0) {
+			res.klar = true;
+			return res;
+		}
 	}
 
 	// ------------------------------------------------ arbetslista
@@ -229,11 +289,12 @@ export async function runEmbedBatch(
 			`SELECT l.uuid FROM lamning l
 			  WHERE l.id IN (${SCOPE_IDS})
 			    AND NOT EXISTS (SELECT 1 FROM inbaddning i WHERE i.uuid = l.uuid AND i.rad_hash = l.hash AND i.modell = ?)
-			    AND NOT EXISTS (SELECT 1 FROM inbaddning_fel f WHERE f.uuid = l.uuid AND f.rad_hash = l.hash AND f.forsok >= ?)
+			    AND NOT EXISTS (SELECT 1 FROM inbaddning_fel f WHERE f.uuid = l.uuid AND f.rad_hash = l.hash AND f.forsok >= ? AND f.andrad > ?)
 			  ORDER BY l.id LIMIT ?`,
 			scopeJson,
 			MODELL,
 			MAX_FEL_PER_POST,
+			omprovas,
 			limit + 1,
 		);
 		nyaKvar = nya.length > limit;
@@ -272,10 +333,10 @@ export async function runEmbedBatch(
 		lista,
 	))
 		data.set(r.uuid, r);
-	const felade = new Map<string, { rad_hash: string; forsok: number; senaste_fel: string | null }>();
-	for (const r of await rows<{ uuid: string; rad_hash: string; forsok: number; senaste_fel: string | null }>(
+	const felade = new Map<string, { rad_hash: string; forsok: number; senaste_fel: string | null; andrad: string }>();
+	for (const r of await rows<{ uuid: string; rad_hash: string; forsok: number; senaste_fel: string | null; andrad: string }>(
 		db,
-		"SELECT uuid, rad_hash, forsok, senaste_fel FROM inbaddning_fel WHERE uuid IN (SELECT value FROM json_each(?))",
+		"SELECT uuid, rad_hash, forsok, senaste_fel, andrad FROM inbaddning_fel WHERE uuid IN (SELECT value FROM json_each(?))",
 		lista,
 	))
 		felade.set(r.uuid, r);
@@ -355,8 +416,9 @@ export async function runEmbedBatch(
 			continue;
 		}
 		const f = felade.get(uuid);
-		if (f && f.rad_hash === d.hash && f.forsok >= MAX_FEL_PER_POST) {
-			// Har fallerat för många gånger med samma text: hoppa över (och ta ur kön) tills raden ändras.
+		if (f && f.rad_hash === d.hash && f.forsok >= MAX_FEL_PER_POST && f.andrad > omprovas) {
+			// Har fallerat för många gånger med samma text: hoppa över (och ta ur kön) tills raden
+			// ändras eller OMPROVNING_DYGN dygn gått sedan senaste försöket.
 			console.warn(`inbäddning: ${uuid} hoppas över efter ${f.forsok} misslyckade försök (${f.senaste_fel ?? "okänt fel"})`);
 			bokforing.push(ur(uuid));
 			continue;
@@ -371,20 +433,50 @@ export async function runEmbedBatch(
 
 	// ------------------------------------------------ inbäddning
 	// En del som fallerar halveras ned till enskilda lämningar, så att en text som
-	// modellen avvisar inte blockerar resten. Enskilda fel bokförs i inbaddning_fel;
-	// efter MAX_FEL_PER_POST försök hoppas lämningen över tills raden ändras.
+	// modellen avvisar inte blockerar resten. Ett fel räknas som textens bara när
+	// en annan text i körningen lyckats: fallerar ett anrop innan något lyckats,
+	// prövas först en kontrolltext. Fallerar även den är det ett avbrott, och
+	// körningen avbryts utan att något bokförs. Entydiga indatafel (arIndatafel)
+	// bokförs direkt.
 	let aiFel = 0;
+	let lyckadeAnrop = 0;
+	let kontroll: "ok" | "fel" | undefined;
 	const felSatser: D1LikeStatement[] = [];
+	const bokforFel = (j: Jobb, belagg: string, msg: string) => {
+		felSatser.push(
+			db
+				.prepare(
+					"INSERT INTO inbaddning_fel (uuid, rad_hash, forsok, senaste_fel, andrad) VALUES (?, ?, 1, ?, ?) ON CONFLICT(uuid) DO UPDATE SET forsok = CASE WHEN inbaddning_fel.rad_hash = excluded.rad_hash THEN inbaddning_fel.forsok + 1 ELSE 1 END, rad_hash = excluded.rad_hash, senaste_fel = excluded.senaste_fel, andrad = excluded.andrad",
+				)
+				.bind(j.uuid, j.radHash, (belagg + msg).slice(0, 500), tid),
+		);
+		res.fel = (res.fel ?? 0) + 1;
+	};
+	/** Fungerar tjänsten? Ett anrop med en text som alltid ska gå igenom; en gång per körning. */
+	const tjanstenSvarar = async (): Promise<boolean> => {
+		if (!kontroll) {
+			try {
+				vektorerUrSvar(await ai.run(MODELL, { text: [KONTROLLTEXT], truncate_inputs: true }), 1);
+				kontroll = "ok";
+				lyckadeAnrop++;
+			} catch (e) {
+				kontroll = "fel";
+				console.error(`inbäddning: kontrolltexten fallerade också (${(e instanceof Error ? e.message : String(e)).slice(0, 300)})`);
+			}
+		}
+		return kontroll === "ok";
+	};
 	const baddaIn = async (del: Jobb[]): Promise<Array<{ j: Jobb; v: number[] }>> => {
 		try {
 			const svar = await ai.run(MODELL, { text: del.map((j) => j.text), truncate_inputs: true });
 			const v = vektorerUrSvar(svar, del.length);
+			lyckadeAnrop++;
 			return del.map((j, k) => ({ j, v: v[k] }));
 		} catch (e) {
 			aiFel++;
 			const msg = e instanceof Error ? e.message : String(e);
 			console.error(`inbäddning: Workers AI fallerade för ${del.length} texter (${del[0].uuid} …): ${msg.slice(0, 500)}`);
-			if (aiFel >= MAX_AI_FEL_PER_KORNING) {
+			if ((lyckadeAnrop === 0 && aiFel >= MAX_AI_FEL_PER_KORNING) || aiFel >= MAX_AI_FEL_TOTALT) {
 				const fel = new Error(`Workers AI fallerade ${aiFel} gånger i körningen; avbryter (senaste: ${msg.slice(0, 300)})`);
 				(fel as { cause?: unknown }).cause = e;
 				throw fel;
@@ -395,52 +487,91 @@ export async function runEmbedBatch(
 				res.tillfalliga_fel = (res.tillfalliga_fel ?? 0) + del.length;
 				return [];
 			}
+			if (del.length === 1 && arIndatafel(e)) {
+				bokforFel(del[0], BELAGG_INDATAFEL, msg);
+				return [];
+			}
+			if (lyckadeAnrop === 0 && !(await tjanstenSvarar())) {
+				const fel = new Error(`Workers AI svarar inte (avbrott): både texterna och kontrolltexten fallerade; inget bokfört, inget försök förbrukat (senaste: ${msg.slice(0, 300)})`);
+				(fel as { cause?: unknown }).cause = e;
+				throw fel;
+			}
 			if (del.length === 1) {
-				felSatser.push(
-					db
-						.prepare(
-							"INSERT INTO inbaddning_fel (uuid, rad_hash, forsok, senaste_fel, andrad) VALUES (?, ?, 1, ?, ?) ON CONFLICT(uuid) DO UPDATE SET forsok = CASE WHEN inbaddning_fel.rad_hash = excluded.rad_hash THEN inbaddning_fel.forsok + 1 ELSE 1 END, rad_hash = excluded.rad_hash, senaste_fel = excluded.senaste_fel, andrad = excluded.andrad",
-						)
-						.bind(del[0].uuid, del[0].radHash, msg.slice(0, 500), tid),
-				);
-				res.fel = (res.fel ?? 0) + 1;
+				bokforFel(del[0], BELAGG_ANNAN_LYCKADES, msg);
 				return [];
 			}
 			const mitt = Math.ceil(del.length / 2);
 			return [...(await baddaIn(del.slice(0, mitt))), ...(await baddaIn(del.slice(mitt)))];
 		}
 	};
-	for (let i = 0; i < jobb.length; i += AI_BATCH) {
-		const ok = await baddaIn(jobb.slice(i, i + AI_BATCH));
+	try {
+		for (let i = 0; i < jobb.length; i += AI_BATCH) {
+			const ok = await baddaIn(jobb.slice(i, i + AI_BATCH));
+			if (felSatser.length) await db.batch(felSatser.splice(0));
+			const del = ok.map((x) => x.j);
+			const vektorer = ok.map((x) => x.v);
+			if (!del.length) continue;
+			const upserts: VectorizeVector[] = [];
+			const overskott: string[] = [];
+			del.forEach((j, k) => {
+				j.meta.forEach((m, v) =>
+					upserts.push({ id: vektorId(j.uuid, v), values: vektorer[k], metadata: m }),
+				);
+				if (j.tidigare > j.meta.length)
+					overskott.push(...idsFor(j.uuid, j.meta.length, j.tidigare));
+			});
+			for (let u = 0; u < upserts.length; u += UPSERT_BATCH)
+				await vec.upsert(upserts.slice(u, u + UPSERT_BATCH));
+			if (overskott.length) await vec.deleteByIds(overskott);
+			const satser = del.flatMap((j) => [
+				spara(j.uuid, j.radHash, j.innehall, j.meta.length, "ok"),
+				ur(j.uuid),
+				db.prepare("DELETE FROM inbaddning_fel WHERE uuid = ?").bind(j.uuid),
+			]);
+			for (let s = 0; s < satser.length; s += 60) await db.batch(satser.slice(s, s + 60));
+			res.inbaddade += del.length;
+			res.vektorer += upserts.length;
+		}
+	} finally {
+		// Även när körningen avbryts bokförs det som redan har belägg.
 		if (felSatser.length) await db.batch(felSatser.splice(0));
-		const del = ok.map((x) => x.j);
-		const vektorer = ok.map((x) => x.v);
-		if (!del.length) continue;
-		const upserts: VectorizeVector[] = [];
-		const overskott: string[] = [];
-		del.forEach((j, k) => {
-			j.meta.forEach((m, v) =>
-				upserts.push({ id: vektorId(j.uuid, v), values: vektorer[k], metadata: m }),
-			);
-			if (j.tidigare > j.meta.length)
-				overskott.push(...idsFor(j.uuid, j.meta.length, j.tidigare));
-		});
-		for (let u = 0; u < upserts.length; u += UPSERT_BATCH)
-			await vec.upsert(upserts.slice(u, u + UPSERT_BATCH));
-		if (overskott.length) await vec.deleteByIds(overskott);
-		const satser = del.flatMap((j) => [
-			spara(j.uuid, j.radHash, j.innehall, j.meta.length, "ok"),
-			ur(j.uuid),
-		]);
-		for (let s = 0; s < satser.length; s += 50) await db.batch(satser.slice(s, s + 50));
-		res.inbaddade += del.length;
-		res.vektorer += upserts.length;
 	}
 
 	const koKvar = await rows<{ n: number }>(db, "SELECT count(*) AS n FROM inbaddning_ko");
 	res.klar = !nyaKvar && !gamlaKvar && Number(koKvar[0]?.n ?? 0) === 0 && !res.fel && !res.tillfalliga_fel;
 	if (res.klar) await markeraKlar(db, signatur, tid);
 	return res;
+}
+
+/**
+ * Engångsrensning (idempotent): tar bort bokförda fel som saknar belägg för att
+ * felet gällde texten. Före BELAGG_* räknades okända fel som textens även när
+ * Workers AI var nere för alla, så lämningar kunde hoppas över för gott.
+ * Rader med ett entydigt indatafel i meddelandet behålls. Markören i
+ * synk_status gör att rensningen bara körs en gång; körs den igen gör den
+ * ingenting, eftersom alla nya rader har ett belägg.
+ */
+async function rensaOverhoppningarUtanBelagg(db: D1Like, tid: string): Promise<void> {
+	const kandidater = await rows<{ uuid: string; senaste_fel: string | null }>(
+		db,
+		"SELECT uuid, senaste_fel FROM inbaddning_fel WHERE senaste_fel IS NULL OR (senaste_fel NOT LIKE ? AND senaste_fel NOT LIKE ?)",
+		`${BELAGG_ANNAN_LYCKADES}%`,
+		`${BELAGG_INDATAFEL}%`,
+	);
+	const bort = kandidater.filter((r) => !arIndatafel(new Error(r.senaste_fel ?? ""))).map((r) => r.uuid);
+	const satser: D1LikeStatement[] = [];
+	for (let i = 0; i < bort.length; i += 500)
+		satser.push(db.prepare("DELETE FROM inbaddning_fel WHERE uuid IN (SELECT value FROM json_each(?))").bind(JSON.stringify(bort.slice(i, i + 500))));
+	if (bort.length) {
+		satser.push(db.prepare("DELETE FROM synk_status WHERE nyckel = 'inbaddning_klar'"));
+		console.warn(`inbäddning: ${bort.length} överhoppningar utan belägg rensade (prövas igen)`);
+	}
+	satser.push(
+		db
+			.prepare(`INSERT INTO synk_status (nyckel, varde, andrad) VALUES ('${RENSNING_NYCKEL}', ?, ?) ON CONFLICT(nyckel) DO UPDATE SET varde = excluded.varde, andrad = excluded.andrad`)
+			.bind(RENSNING_VERSION, tid),
+	);
+	await db.batch(satser);
 }
 
 async function markeraKlar(db: D1Like, signatur: string, tid: string): Promise<void> {

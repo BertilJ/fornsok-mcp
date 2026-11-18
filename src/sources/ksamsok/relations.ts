@@ -18,26 +18,48 @@
  *   ger allt på en gång; lämningen själv kommer med (den ersätter FMI-posten)
  *   och sorteras bort.
  * - `itemId="uri" OR …` ger enskilda objekt; används bara för relationer som
- *   `relUri` inte täcker (relationer som står hos lämningen själv).
+ *   `relUri` inte täcker (relationer som står hos lämningen själv, eller som
+ *   inte kom med på relUri-sidorna).
+ * - En annan lämning i relUri-svaret som inte har någon relation till
+ *   lämningen är funnen via en FMI-post: den ersätter troligen samma post
+ *   (lämningar ger inga referenser i presentationsformatet). Den räknas inte
+ *   som material, men svaret varnar för att material via FMI-posten kan gälla
+ *   den lämningen.
  *
- * Alltså högst tre anrop per lämning: getRelations, relUri-sökningen och
- * (sällan) ett objektuppslag. Resultatet cachas i KV (cache/kv.ts).
+ * Anrop per lämning: getRelations, relUri-sökningen (1 000 per sida, högst
+ * RELURI_MAX_SIDOR sidor) och vid behov objektuppslag i omgångar (frågan hålls
+ * under gränsen i listan över tillåtna anrop), högst MAX_OBJEKTUPPSLAG objekt.
+ * Objekt som inte slås upp visas med relation och adress, märkta som ej
+ * uppslagna, med slaget härlett ur relationstypen. Resultatet cachas i KV
+ * (cache/kv.ts).
  */
 import { KSAMSOK_API, KSAMSOK_LAMNING_URI } from "../../config";
-import { UpstreamError } from "../../errors";
+import { DisallowedCallError, UpstreamError } from "../../errors";
 import type { UpstreamClient, UpstreamResponse } from "../../upstream/client";
 import type { RelateratBild, RelateratLista, RelateratObjekt, RelateratSlag, RelationSource } from "../types";
 import { asArray, extractXmlError, parseSearchResponse } from "./parse";
 import { quote } from "./query";
+import { RELATIONSTYPER } from "./relationstyper";
 
 /** Högst så många relationer begärs från getRelations. */
 export const RELATIONER_MAX = 2000;
-/** Högst så många objekt hämtas i relUri-sökningen (K-samsök tillåter 1–1 000 per sida). */
-export const RELURI_MAX = 500;
+/** Objekt per sida i relUri-sökningen (K-samsök tillåter 1–1 000 per sida). */
+export const RELURI_PER_SIDA = 1000;
+/** Högst så många sidor hämtas i relUri-sökningen (alltså högst 2 000 objekt, som getRelations). */
+export const RELURI_MAX_SIDOR = 2;
 /** Högst så många äldre FMI-poster tas med i relUri-sökningen. */
 export const MAX_FMI = 10;
-/** Högst så många objekt slås upp med itemId i ett anrop. */
-export const MAX_OBJEKTUPPSLAG = 40;
+/** Högst så många objekt slås upp med itemId per lämning (i omgångar). */
+export const MAX_OBJEKTUPPSLAG = 120;
+/** Längsta `query` i ett objektuppslag: listan över tillåtna anrop godtar 4 000 tecken. */
+export const MAX_FRAGA_TECKEN = 3500;
+
+/**
+ * Värdar som K-samsöks länkar brukar gå till (sedda i K-samsöks svar
+ * 2026-11-18): K-samsök själv, RAÄ (pub.raa.se m.fl.) och licenssidorna.
+ * Länkar till andra värdar visas, men märkta som okänd värd.
+ */
+export const KANDA_VARDAR = ["kulturarvsdata.se", "raa.se", "creativecommons.org", "rightsstatements.org"] as const;
 
 export const FMI_URI_RE = /^http:\/\/kulturarvsdata\.se\/raa\/fmi\/\d{1,20}$/;
 /** Objekt-URI i K-samsök: http://kulturarvsdata.se/{organisation}/{tjänst}/{id}. */
@@ -60,24 +82,43 @@ export function relationsUrl(uuid: string): string {
 	return u.href;
 }
 
-function sokUrl(query: string, hitsPerPage: number): string {
+function sokUrl(query: string, hitsPerPage: number, startRecord = 1): string {
 	const u = new URL(KSAMSOK_API);
 	u.searchParams.set("method", "search");
 	u.searchParams.set("query", query);
 	u.searchParams.set("hitsPerPage", String(Math.max(1, Math.min(1000, hitsPerPage))));
-	u.searchParams.set("startRecord", "1");
+	u.searchParams.set("startRecord", String(Math.max(1, startRecord)));
 	u.searchParams.set("recordSchema", "presentation");
 	return u.href;
 }
 
 /** `relUri="lämning" OR relUri="fmi"…` – objekt som har en relation till lämningen eller FMI-posterna. */
-export function relUriUrl(uris: readonly string[]): string {
-	return sokUrl(uris.map((u) => `relUri=${quote(u)}`).join(" OR "), RELURI_MAX);
+export function relUriUrl(uris: readonly string[], startRecord = 1): string {
+	return sokUrl(uris.map((u) => `relUri=${quote(u)}`).join(" OR "), RELURI_PER_SIDA, startRecord);
 }
 
 /** `itemId="uri" OR …` – enskilda objekt. */
 export function objektUrl(uris: readonly string[]): string {
-	return sokUrl(uris.map((u) => `itemId=${quote(u)}`).join(" OR "), uris.length);
+	return sokUrl(objektFraga(uris), uris.length);
+}
+
+function objektFraga(uris: readonly string[]): string {
+	return uris.map((u) => `itemId=${quote(u)}`).join(" OR ");
+}
+
+/** Dela objektuppslagen i omgångar vars fråga håller sig under MAX_FRAGA_TECKEN. */
+export function objektOmgangar(uris: readonly string[]): string[][] {
+	const out: string[][] = [];
+	let del: string[] = [];
+	for (const u of uris) {
+		if (del.length && objektFraga([...del, u]).length > MAX_FRAGA_TECKEN) {
+			out.push(del);
+			del = [];
+		}
+		del.push(u);
+	}
+	if (del.length) out.push(del);
+	return out;
 }
 
 /** Tolka getRelations. Kastar UpstreamError med K-samsöks felmeddelande (JSON eller XML). */
@@ -118,16 +159,35 @@ function text(x: unknown): string | null {
 	return null;
 }
 
-/** En adress som får skrivas i ett svar: bara http(s), utan blanksteg, högst 500 tecken. */
+/**
+ * En adress som får skrivas i ett svar: bara http(s), högst 500 tecken, inga
+ * blanksteg, styr- eller osynliga tecken, inga användaruppgifter
+ * (`https://pub.raa.se@evil.example/` pekar på evil.example). Returnerar den
+ * normaliserade adressen (URL-tolkad: värden i gemener och punycode, övrigt
+ * procentkodat), aldrig den råa strängen.
+ */
 export function sakerUrl(x: unknown): string | null {
 	const s = text(x);
-	if (!s || s.length > 500 || /[\s<>"]/.test(s)) return null;
+	if (!s || s.length > 500 || /[\p{Z}\p{Cc}\p{Cf}\s<>"\\]/u.test(s)) return null;
 	try {
 		const u = new URL(s);
-		return u.protocol === "https:" || u.protocol === "http:" ? s : null;
+		if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+		if (u.username || u.password || !u.hostname.includes(".")) return null;
+		return u.href.length <= 600 ? u.href : null;
 	} catch {
 		return null;
 	}
+}
+
+/** Värden i en (redan säker) adress, och om den hör till KANDA_VARDAR. */
+export function lankVard(url: string): { vard: string; kand: boolean } {
+	let vard = "";
+	try {
+		vard = new URL(url).hostname;
+	} catch {
+		return { vard: "okänd", kand: false };
+	}
+	return { vard, kand: KANDA_VARDAR.some((k) => vard === k || vard.endsWith(`.${k}`)) };
 }
 
 /** Årtal ur pres:timeLabel ("1933-01-01 00:00:00 - 1933-12-31 00:00:00" → "1933"). */
@@ -223,11 +283,18 @@ export function parsePresObjekt(rec: unknown): PresObjekt | null {
  * "object" (Historiska museet m.fl.) – inget sådant objekt hittades vid
  * undersökningen, så klassningen är oprövad mot riktiga relationer.
  */
-export function klassa(o: { relationstyp: string | null; uri: string; typ: string | null; tjanst: string | null }): RelateratSlag {
+export function klassa(o: { relationstyp: string | null; uri: string; typ: string | null; tjanst: string | null; uppslagen?: boolean }): RelateratSlag {
 	const typ = (o.typ ?? "").toLocaleLowerCase("sv");
 	const tjanst = (o.tjanst ?? "").toLocaleLowerCase("sv");
-	if (o.relationstyp === "replaces" || o.relationstyp === "isReplacedBy" || FMI_URI_RE.test(o.uri)) return "äldre post";
+	if (o.relationstyp === "replaces" || o.relationstyp === "multipleReplaces" || o.relationstyp === "isReplacedBy" || FMI_URI_RE.test(o.uri)) return "äldre post";
 	if (o.relationstyp === "sameAs") return "övrigt";
+	// Inte uppslaget (inga uppgifter om tjänst och typ): slaget ur relationstypen.
+	if (o.uppslagen === false) {
+		if (o.relationstyp === "isVisualizedBy" || o.relationstyp === "hasImage" || /\/raa\/kmb\//.test(o.uri)) return "foto";
+		if (o.relationstyp === "isDescribedBy") return /\/raa\/dokumentation\//.test(o.uri) ? "arkivhandling" : "dokumentation";
+		if (o.relationstyp === "hasFind") return "föremål";
+		return "övrigt";
+	}
 	if (tjanst === "arkiv-bilder" || tjanst === "kmb" || /\/raa\/kmb\//.test(o.uri) || /^(foto|fotografi|bild|ritning|teckning)$/.test(typ)) return "foto";
 	if (tjanst === "arkiv-dokument") return "arkivhandling";
 	if (/föremål/.test(typ) || tjanst === "object") return "föremål";
@@ -236,6 +303,8 @@ export function klassa(o: { relationstyp: string | null; uri: string; typ: strin
 }
 
 // ---------------------------------------------------------------- källan
+
+const LAMNING_URI_RE = /^http:\/\/kulturarvsdata\.se\/raa\/lamning\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export class KsamsokRelationSource implements RelationSource {
 	constructor(
@@ -250,73 +319,127 @@ export class KsamsokRelationSource implements RelationSource {
 		const anmarkningar: string[] = [];
 		let delvis_fel = false;
 
-		const relationer = parseRelations(await this.client.get(relationsUrl(uuid)));
+		const relationerRa = parseRelations(await this.client.get(relationsUrl(uuid)));
+		// Bara relationer till giltiga K-samsök-adresser (URI:n är extern text).
+		const relationer = relationerRa.filter((r) => KSAMSOK_OBJEKT_URI_RE.test(r.uri));
+		if (relationerRa.length > relationer.length) anmarkningar.push(`${relationerRa.length - relationer.length} relationer med en adress som inte är en K-samsök-URI utelämnades.`);
 		const relPerUri = new Map<string, Relation>();
 		for (const r of relationer) if (r.uri !== egen && !relPerUri.has(r.uri)) relPerUri.set(r.uri, r);
-		const fmiAlla = [...new Set(relationer.filter((r) => r.typ === "replaces" && FMI_URI_RE.test(r.uri)).map((r) => r.uri))];
+		const fmiAlla = [...new Set(relationer.filter((r) => (r.typ === "replaces" || r.typ === "multipleReplaces") && FMI_URI_RE.test(r.uri)).map((r) => r.uri))];
 		const fmi = fmiAlla.slice(0, MAX_FMI);
 		if (fmiAlla.length > fmi.length) anmarkningar.push(`Lämningen ersätter ${fmiAlla.length} äldre FMI-poster; material kopplat till de ${MAX_FMI} första togs med.`);
 
-		// Objekten som pekar på lämningen eller på FMI-posterna, med uppgifter, i ett anrop.
-		const sok = parseSearchResponse(await this.client.get(relUriUrl([egen, ...fmi])));
-		let ofullstandig = sok.totalHits > sok.records.length;
+		// Objekten som pekar på lämningen eller på FMI-posterna, med uppgifter: relUri, sida för sida.
 		const objekt: RelateratObjekt[] = [];
 		const sedda = new Set<string>([egen]);
+		const andraLamningar: Array<{ uri: string; nr: string | null }> = [];
 		let lamningsnummer: string | null = null;
-		const lagg = (p: PresObjekt) => {
+		let ogiltiga = 0;
+		const lagg = (p: PresObjekt, viaUppslag: boolean) => {
 			if (p.uri === egen) {
 				if (p.idLabel && /^L\d{4}:\d+$/.test(p.idLabel)) lamningsnummer = p.idLabel;
 				return;
 			}
+			if (!KSAMSOK_OBJEKT_URI_RE.test(p.uri)) {
+				ogiltiga++;
+				return;
+			}
 			if (sedda.has(p.uri)) return;
+			const rel = relPerUri.get(p.uri) ?? null;
+			if (!rel && !viaUppslag && LAMNING_URI_RE.test(p.uri)) {
+				// En annan lämning, funnen via en FMI-post: ersätter troligen samma post.
+				sedda.add(p.uri);
+				andraLamningar.push({ uri: p.uri, nr: p.idLabel && /^L\d{4}:\d+$/.test(p.idLabel) ? p.idLabel : null });
+				return;
+			}
 			sedda.add(p.uri);
-			const rel = relPerUri.get(p.uri);
-			// Utan relation till lämningen är objektet funnet via en FMI-post (referensen säger vilken).
-			const kopplad = rel ? egen : (fmi.find((f) => p.referenser.includes(f)) ?? egen);
-			objekt.push(tillObjekt(p, rel ?? null, kopplad));
+			// Utan relation till lämningen är objektet funnet via en FMI-post; referensen säger vilken.
+			// Saknas referensen är kopplingen okänd (null).
+			const viaFmi = fmi.filter((f) => p.referenser.includes(f));
+			const kopplad = rel ? egen : (viaFmi[0] ?? null);
+			objekt.push(tillObjekt(p, rel, kopplad));
 		};
-		for (const rec of sok.records) {
-			const p = parsePresObjekt(rec);
-			if (p) lagg(p);
+		let totalHits = 0;
+		let hamtade = 0;
+		let relUriFel = false;
+		try {
+			for (let sida = 0; sida < RELURI_MAX_SIDOR; sida++) {
+				const sok = parseSearchResponse(await this.client.get(relUriUrl([egen, ...fmi], 1 + sida * RELURI_PER_SIDA)));
+				totalHits = sok.totalHits;
+				hamtade += sok.records.length;
+				for (const rec of sok.records) {
+					const p = parsePresObjekt(rec);
+					if (p) lagg(p, false);
+				}
+				if (!sok.records.length || hamtade >= totalHits) break;
+			}
+		} catch (err) {
+			if (!(err instanceof UpstreamError)) throw err;
+			relUriFel = true;
+			delvis_fel = true;
+			anmarkningar.push(`Sökningen efter objektens uppgifter i K-samsök misslyckades (${err.message}); relationerna visas ändå.`);
 		}
+		let ofullstandig = totalHits > hamtade;
 
-		// Relationer som relUri inte täckte (de som står hos lämningen själv), utom FMI-posterna.
-		const kvar = [...relPerUri.values()].filter((r) => !sedda.has(r.uri) && !FMI_URI_RE.test(r.uri) && KSAMSOK_OBJEKT_URI_RE.test(r.uri));
+		// Relationer som relUri inte gav (de som står hos lämningen själv, eller som inte kom med på
+		// sidorna), utom FMI-posterna: objektuppslag i omgångar.
+		const kvar = [...relPerUri.values()].filter((r) => !sedda.has(r.uri) && !FMI_URI_RE.test(r.uri));
+		const uppslagna = new Set<string>();
 		if (kvar.length) {
 			const uppslag = kvar.slice(0, MAX_OBJEKTUPPSLAG);
+			const fallerade: string[] = [];
+			for (const omg of objektOmgangar(uppslag.map((r) => r.uri))) {
+				try {
+					const svar = parseSearchResponse(await this.client.get(objektUrl(omg)));
+					for (const u of omg) uppslagna.add(u);
+					for (const rec of svar.records) {
+						const p = parsePresObjekt(rec);
+						if (p && relPerUri.has(p.uri)) lagg(p, true);
+					}
+				} catch (err) {
+					if (!(err instanceof UpstreamError) && !(err instanceof DisallowedCallError)) throw err;
+					delvis_fel = true;
+					fallerade.push(err.message);
+				}
+			}
+			const ejUppslagna = kvar.length - uppslagna.size;
+			if (fallerade.length) anmarkningar.push(`Uppgifter om ${uppslag.length - uppslagna.size} objekt kunde inte hämtas (${fallerade[0]}); bara relationen visas.`);
 			if (kvar.length > uppslag.length) {
 				ofullstandig = true;
-				anmarkningar.push(`${kvar.length - uppslag.length} relationer slogs inte upp (högst ${MAX_OBJEKTUPPSLAG} per anrop).`);
+				anmarkningar.push(`${kvar.length - uppslag.length} objekt slogs inte upp (högst ${MAX_OBJEKTUPPSLAG} per lämning).`);
 			}
-			try {
-				const svar = parseSearchResponse(await this.client.get(objektUrl(uppslag.map((r) => r.uri))));
-				for (const rec of svar.records) {
-					const p = parsePresObjekt(rec);
-					if (p && relPerUri.has(p.uri)) lagg(p);
-				}
-			} catch (err) {
-				if (!(err instanceof UpstreamError)) throw err;
-				delvis_fel = true;
-				anmarkningar.push(`Uppgifter om ${uppslag.length} objekt kunde inte hämtas (${err.message}); bara relationen visas.`);
-			}
+			if (ejUppslagna > 0) anmarkningar.push(`${ejUppslagna} objekt saknar uppgifter eftersom de inte slogs upp: för dem visas bara relation och adress, och slaget är härlett ur relationstypen.`);
 		}
 		// Relationer utan uppgifter i K-samsök (bl.a. FMI-posterna) visas med bara relation och URI.
 		for (const r of relPerUri.values()) {
 			if (sedda.has(r.uri)) continue;
 			sedda.add(r.uri);
-			objekt.push(bartObjekt(r, egen));
+			objekt.push(bartObjekt(r, egen, FMI_URI_RE.test(r.uri) || uppslagna.has(r.uri)));
 		}
-		if (ofullstandig) anmarkningar.push(`K-samsök har ${sok.totalHits} objekt kopplade till lämningen; de ${sok.records.length} första hämtades.`);
+		if (ogiltiga) anmarkningar.push(`${ogiltiga} objekt med en adress som inte är en K-samsök-URI utelämnades.`);
+		if (ofullstandig && !relUriFel) anmarkningar.push(`K-samsök har ${totalHits} objekt kopplade till lämningen och FMI-posterna; de ${hamtade} första hämtades med uppgifter.`);
+		// Material via FMI-poster: kan gälla en grannlämning eller en del av det sammanslagna.
+		const viaFmiAntal = objekt.filter((o) => o.kopplad_till !== egen && o.slag !== "äldre post").length;
+		if (fmiAlla.length > 1 && viaFmiAntal)
+			anmarkningar.push(`Lämningen ersätter ${fmiAlla.length} äldre FMI-poster. ${viaFmiAntal} objekt är kopplade till en FMI-post, inte till lämningen; de kan gälla bara en del av det som slagits samman, eller en grannlämning.`);
+		if (andraLamningar.length)
+			anmarkningar.push(`${andraLamningar.length === 1 ? "En annan lämning" : `${andraLamningar.length} andra lämningar`} (${andraLamningar.slice(0, 5).map((l) => l.nr ?? l.uri).join(", ")}${andraLamningar.length > 5 ? " …" : ""}) är också kopplad${andraLamningar.length === 1 ? "" : "e"} till de äldre FMI-posterna och ersätter troligen samma post; material som är kopplat till en FMI-post kan gälla ${andraLamningar.length === 1 ? "den lämningen" : "någon av dem"} i stället.`);
 
 		return { uuid, lamningsnummer, objekt: sortera(objekt), relationer: relationer.length, ofullstandig, hamtad: this.now().toISOString(), delvis_fel, anmarkningar };
 	}
 }
 
-function tillObjekt(p: PresObjekt, rel: Relation | null, kopplad: string): RelateratObjekt {
-	const relationstyp = rel?.typ ?? null;
+/** Relationstypen om den är känd, annars null (och flaggan relationstyp_okand). */
+function kandRelation(rel: Relation | null): { relationstyp: string | null; relationstyp_okand?: true } {
+	if (!rel) return { relationstyp: null };
+	return RELATIONSTYPER.has(rel.typ) ? { relationstyp: rel.typ } : { relationstyp: null, relationstyp_okand: true };
+}
+
+function tillObjekt(p: PresObjekt, rel: Relation | null, kopplad: string | null): RelateratObjekt {
+	const r = kandRelation(rel);
 	return {
-		slag: klassa({ relationstyp, uri: p.uri, typ: p.typ, tjanst: p.tjanst }),
-		relationstyp,
+		slag: klassa({ relationstyp: r.relationstyp, uri: p.uri, typ: p.typ, tjanst: p.tjanst }),
+		...r,
 		harledd: rel ? rel.harledd : null,
 		kopplad_till: kopplad,
 		uri: p.uri,
@@ -331,13 +454,15 @@ function tillObjekt(p: PresObjekt, rel: Relation | null, kopplad: string): Relat
 		url: p.url,
 		bilder: p.bilder,
 		uppgifter: true,
+		uppslagen: true,
 	};
 }
 
-function bartObjekt(r: Relation, egen: string): RelateratObjekt {
+function bartObjekt(r: Relation, egen: string, uppslagen: boolean): RelateratObjekt {
+	const k = kandRelation(r);
 	return {
-		slag: klassa({ relationstyp: r.typ, uri: r.uri, typ: null, tjanst: null }),
-		relationstyp: r.typ,
+		slag: klassa({ relationstyp: k.relationstyp, uri: r.uri, typ: null, tjanst: null, uppslagen }),
+		...k,
 		harledd: r.harledd,
 		kopplad_till: egen,
 		uri: r.uri,
@@ -352,13 +477,14 @@ function bartObjekt(r: Relation, egen: string): RelateratObjekt {
 		url: null,
 		bilder: [],
 		uppgifter: false,
+		uppslagen,
 	};
 }
 
 /** Slag i fast ordning; inom slaget objekt kopplade till lämningen före dem via FMI-poster, annars K-samsöks ordning. */
 function sortera(objekt: RelateratObjekt[]): RelateratObjekt[] {
 	const ordning = ["foto", "arkivhandling", "föremål", "dokumentation", "äldre post", "övrigt"];
-	const egen = (o: RelateratObjekt) => (o.kopplad_till.includes("/raa/lamning/") ? 0 : 1);
+	const egen = (o: RelateratObjekt) => (o.kopplad_till?.includes("/raa/lamning/") ? 0 : 1);
 	return objekt
 		.map((o, i) => ({ o, i }))
 		.sort((a, b) => ordning.indexOf(a.o.slag) - ordning.indexOf(b.o.slag) || egen(a.o) - egen(b.o) || a.i - b.i)
