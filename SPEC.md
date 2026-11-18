@@ -16,7 +16,7 @@ Märkning: **[V]** = verifierat med riktiga anrop, **[D]** = enligt dokumentatio
 | Inloggning | Passkey eller engångskod via e-post, Managed OAuth mot MCP-klienter. Workern verifierar Access-intyget på varje anrop |
 | Verktyg (nio) | `sok_lamningar`, `lamningar_nara`, `lamning`, `lamning_dokument`, `hamta_dokument`, `relaterat`, `statistik`, `uppslag`, `hitta_plats` |
 | Index | Hela landet i D1: 766 389 lämningar, laddat ur GeoPackage 2026-11-17 **[V]** |
-| Semantisk sökning | Dalarnas län, 32 743 lämningar inbäddade med `@cf/baai/bge-m3` i Vectorize **[V]** |
+| Semantisk sökning | Dalarnas län: av 32 743 lämningar är 28 497 inbäddade med `@cf/baai/bge-m3` i Vectorize (29 290 vektorer). De övriga 4 246 saknar text utöver registrets standardfras och bäddas inte in **[V]** |
 | Nattsynk | Körs 04:40 svensk vintertid mot RAÄ:s ändringsflöde; första körningen hämtade 99 poster utan fel **[V]** |
 | Kontraktstester | Nattligen på GitHub mot RAÄ:s riktiga tjänster, cirka 26 läsanrop; körda lokalt **[V]** |
 | CI | Typkontroll, lint och tester vid varje push **[V]** |
@@ -532,7 +532,7 @@ Kontot bär annan produktion: Workers, databaser, domäner och Access-applikatio
 | Vectorize | `fornsok-lamningar` | 1 024 dimensioner, cosinus; metadataindex beställda för typ, bedömning, län, kommun, socken, landskap |
 | Access-applikation | "Fornsök MCP", `fornsok.example.se` | Passkey eller engångskod via e-post, Managed OAuth påslaget, policy "Ägare" med ägarens e-postadresser |
 | Inloggningsmetod | Passkeys | Tillagd i Zero Trust-organisationen 2026-11-18 efter ägarens godkännande |
-| Tjänstetoken och testpolicy | `fornsok-mcp-test` | Tillfälliga, för automatiska tester av den skyddade adressen. Tas bort när bygget är klart |
+| Tjänstetoken och testpolicy | `fornsok-mcp-test` | Användes för automatiska tester av den skyddade adressen under bygget. Borttagna 2026-11-18 |
 
 Inga befintliga resursers inställningar är ändrade; det kontrollerades före och efter tillägget av Passkeys **[V]**.
 
