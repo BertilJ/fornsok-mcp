@@ -68,7 +68,7 @@ export interface ScheduledDeps {
 export interface ScheduledOutcome {
 	cron: string;
 	synk: "hoppad" | "ej_schemalagd" | { status: string; nya: number; andrade: number; borttagna: number; kvar: number; fel: number } | { fel: string };
-	inbaddning: "hoppad" | { inbaddade: number; vektorer: number; borttagna: number; klar: boolean; fel_texter?: number; tillfalliga_fel?: number } | { fel: string };
+	inbaddning: "hoppad" | { inbaddade: number; vektorer: number; borttagna: number; klar: boolean; fel_texter?: number } | { fel: string };
 }
 
 const kort = (err: unknown) => (err instanceof Error ? err.message : String(err)).slice(0, 300);
@@ -115,7 +115,7 @@ export async function runScheduled(
 		const vec = env.VECTORIZE;
 		try {
 			const r = await medLas("las_inbaddning", () => deps.runEmbedBatch({ DB: db, AI: ai, VECTORIZE: vec, SEMANTIC_LAN: env.SEMANTIC_LAN }, { max: EMBED_MAX }));
-			out.inbaddning = r === "upptagen" ? { fel: "en annan inbäddningskörning pågår" } : { inbaddade: r.inbaddade, vektorer: r.vektorer, borttagna: r.borttagna, klar: r.klar, ...(r.fel ? { fel_texter: r.fel } : {}), ...(r.tillfalliga_fel ? { tillfalliga_fel: r.tillfalliga_fel } : {}) };
+			out.inbaddning = r === "upptagen" ? { fel: "en annan inbäddningskörning pågår" } : { inbaddade: r.inbaddade, vektorer: r.vektorer, borttagna: r.borttagna, klar: r.klar, ...(r.fel ? { fel_texter: r.fel } : {}) };
 		} catch (err) {
 			out.inbaddning = { fel: kort(err) };
 		}
