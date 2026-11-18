@@ -306,7 +306,7 @@ Servern är för ägaren och enstaka bekanta. Åtkomsten sköts av Cloudflare Ac
 | Del | Utformning |
 |---|---|
 | Access-applikation | Self-hosted, värdnamn `fornsok.example.se` **[D]** |
-| Inloggning | Vid start: engångskod till e-post. Kräver ingen ändring på organisationsnivå. Passkeys (stöds av Access sedan 2026-11-06 **[D]**) läggs till när ägaren uttryckligen godkänt det (avsnitt 14); därefter kan engångskoden stängas av för den här applikationen |
+| Inloggning | Passkey eller engångskod till e-post; användaren väljer på inloggningssidan. Passkeys stöds av Access sedan 2026-11-06 **[D]** och lades till 2026-11-18 efter ägarens godkännande. När passkeyn är registrerad och prövad kan engångskoden stängas av för den här applikationen |
 | Policy | Allow för en lista av e-postadresser: ägaren, och bekanta som läggs till vid behov |
 | MCP-klienter | Managed OAuth påslaget: Access är OAuth-server, klienten öppnar ett webbläsarfönster för passkey-inloggning och får en token **[D]** |
 | Klientregistrering | Dynamisk. Tillåtna omdirigeringsadresser: claude.ai:s och claude.com:s MCP-callback, samt localhost och loopback för Claude Code och Desktop. De exakta adresserna kontrolleras vid uppsättningen **[A]** |
@@ -462,7 +462,7 @@ Kontot bär annan produktion: Workers, databaser, domäner och Access-applikatio
 - Allt som skapas får egna namn med prefixet `fornsok`: Worker `fornsok-mcp`, D1 `fornsok`, Vectorize `fornsok-lamningar`, KV `fornsok-cache`, Access-applikation "Fornsök MCP".
 - Inget befintligt ändras eller tas bort. Före varje skapande kontrolleras att namnet är ledigt.
 - `fornsok.example.se` var ledigt i DNS och det fanns inga Workers-rutter i zonen **[V]**.
-- Inloggningsmetoder i Zero Trust-organisationen i dag: engångskod och Cloudflare-konto. Passkeys finns inte än **[V]**.
+- Inloggningsmetoder i Zero Trust-organisationen: engångskod, Cloudflare-konto och, sedan 2026-11-18, Passkeys **[V]**.
 - Kontospecifika uppgifter (konto-id, teamdomän, resurs-id:n, AUD-tagg, tillåtna e-postadresser) står i den lokala, ospårade filen `.local/drift.md` och ska inte in i spårade filer.
 
 ### Skapat i kontot 2026-11-17
@@ -472,11 +472,13 @@ Kontot bär annan produktion: Workers, databaser, domäner och Access-applikatio
 | D1 | `fornsok` | Tom, Västeuropa |
 | KV | `fornsok-cache` | Tom |
 | Vectorize | `fornsok-lamningar` | 1 024 dimensioner, cosinus; metadataindex beställda för typ, bedömning, län, kommun, socken, landskap |
-| Access-applikation | "Fornsök MCP", `fornsok.example.se` | Engångskod via e-post, Managed OAuth påslaget, policy "Ägare" med ägarens e-postadresser |
+| Access-applikation | "Fornsök MCP", `fornsok.example.se` | Passkey eller engångskod via e-post, Managed OAuth påslaget, policy "Ägare" med ägarens e-postadresser |
+| Inloggningsmetod | Passkeys | Tillagd i Zero Trust-organisationen 2026-11-18 efter ägarens godkännande |
+| Tjänstetoken och testpolicy | `fornsok-mcp-test` | Tillfälliga, för automatiska tester av den skyddade adressen. Tas bort när bygget är klart |
 
-Inga befintliga resurser är ändrade.
+Inga befintliga resursers inställningar är ändrade; det kontrollerades före och efter tillägget av Passkeys **[V]**.
 
-**Kräver ditt godkännande:** att lägga till Passkeys är en ändring på organisationsnivå. Inloggning med engångskod via e-post påverkas inte: metoden finns kvar, och applikationer som är låsta till den ändras inte alls. Befintliga Access-applikationer som godtar alla inloggningsmetoder kommer då också att visa "Sign in with a passkey" på sin inloggningssida. Det ger ingen ny åtkomst (policyn avgör fortfarande), men utseendet ändras. Alternativet är att varje befintlig applikation låses till sina nuvarande metoder först.
+Följd av Passkeys på organisationsnivå: applikationer som är låsta till engångskod påverkas inte. Applikationer som godtar alla inloggningsmetoder visar nu också "Sign in with a passkey" på sin inloggningssida **[D]**. Det ger ingen ny åtkomst, eftersom policyn fortfarande avgör.
 
 Efter uppsättningen behövs ingen token för driften: Workern når D1, Vectorize, KV och Workers AI via bindningar. Den månatliga avstämningen (5.3) körs med `wrangler login` eller en ny, smal token med bara D1: Edit.
 
