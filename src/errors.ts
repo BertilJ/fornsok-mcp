@@ -22,12 +22,20 @@ export const SOURCE_NAMES: Record<SourceId, string> = {
 	nominatim: "OpenStreetMap Nominatim",
 };
 
+/**
+ * Vad som hände när ingen HTTP-status finns: tidsgräns eller nätverksfel (källan
+ * svarade inte), ett för stort svar, eller klientens egen gräns för samtidiga
+ * anrop (källan tillfrågades inte).
+ */
+export type UpstreamFelArt = "tidsgrans" | "natverk" | "for_stort" | "upptaget";
+
 /** Uppströmskällan svarade fel, svarade inte i tid, eller gick inte att tolka. */
 export class UpstreamError extends Error {
 	constructor(
 		readonly source: SourceId,
 		message: string,
 		readonly status?: number,
+		readonly art?: UpstreamFelArt,
 	) {
 		super(message);
 		this.name = "UpstreamError";

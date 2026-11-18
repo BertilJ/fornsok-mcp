@@ -207,7 +207,7 @@ check(!rel.isError && rs.lamning?.uuid === "adc490ba-871a-45bd-8e3d-0a27761b3b6c
 check((rs.objekt ?? []).every((o) => o.slag && o.uri && "bilder" in o && typeof o.uppslagen === "boolean"), "relaterat: varje objekt har slag, uri, bildfält och uppslagen");
 check(typeof rs.utan_uppgifter === "number" && typeof rs.ej_uppslagna === "number" && typeof rs.delvis_fel === "boolean", `relaterat: utan_uppgifter ${rs.utan_uppgifter}, ej_uppslagna ${rs.ej_uppslagna}, delvis_fel ${rs.delvis_fel}`);
 const relText = (rel.content ?? []).map((c) => c.text ?? "").join("\n");
-check(!/RAÄ:s bildvisning/.test(relText) && relText.split("\n").filter((r) => /^\s+Sida: /.test(r)).every((r) => / \([a-z0-9.-]+\)$|okänd värd/.test(r)), "relaterat: värden står vid varje länk, inga påståenden om vart länkarna går");
+check(!/RAÄ:s bildvisning|okänd värd/.test(relText) && relText.split("\n").filter((r) => /^\s+Sida: /.test(r)).every((r) => / \((?:extern länk, värd: )?[a-z0-9.-]+\)$/.test(r)), "relaterat: värden står vid varje länk, inga påståenden om vart länkarna går");
 const relFilter = await call("relaterat", { id: "L2001:646", slag: ["äldre post"] });
 check(!relFilter.isError && (relFilter.structuredContent?.objekt ?? []).every((o) => o.slag === "äldre post"), "relaterat: filter på slag");
 const relOkand = await client.callTool({ name: "relaterat", arguments: { id: "00000000-0000-4000-8000-000000000000" } });

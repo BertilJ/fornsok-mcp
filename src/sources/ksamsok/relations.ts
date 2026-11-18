@@ -26,8 +26,9 @@
  *   som material, men svaret varnar för att material via FMI-posten kan gälla
  *   den lämningen.
  *
- * Anrop per lämning: getRelations, relUri-sökningen (1 000 per sida, högst
- * RELURI_MAX_SIDOR sidor) och vid behov objektuppslag i omgångar (frågan hålls
+ * Anrop per lämning: getRelations, relUri-sökningen (1 000 per sida begärs,
+ * nästa sida börjar efter de poster som faktiskt kom; högst RELURI_MAX_SIDOR
+ * sidor) och vid behov objektuppslag i omgångar (frågan hålls
  * under gränsen i listan över tillåtna anrop), högst MAX_OBJEKTUPPSLAG objekt.
  * Objekt som inte slås upp visas med relation och adress, märkta som ej
  * uppslagna, med slaget härlett ur relationstypen. Resultatet cachas i KV
@@ -55,11 +56,28 @@ export const MAX_OBJEKTUPPSLAG = 120;
 export const MAX_FRAGA_TECKEN = 3500;
 
 /**
- * Värdar som K-samsöks länkar brukar gå till (sedda i K-samsöks svar
- * 2026-11-18): K-samsök själv, RAÄ (pub.raa.se m.fl.) och licenssidorna.
- * Länkar till andra värdar visas, men märkta som okänd värd.
+ * Värdar som K-samsöks länkar brukar gå till: K-samsök själv, RAÄ (pub.raa.se
+ * m.fl.) och licenssidorna (sedda i svaren för testposterna 2026-11-18), och
+ * de stora tjänster som anslutna institutioner publicerar genom:
+ * DigitaltMuseum (bilderna ligger på ems.dimu.org – i en sökning på
+ * "runsten" 2026-11-18 hade 158 av 500 objekt bilder där), Riksarkivet,
+ * Wikimedia Commons (sidorna och filservern) och svenska Wikipedia. Listan är
+ * avsiktligt kort: enskilda museers egna bildservrar (Carlotta, Sofie m.fl.)
+ * förekommer också och visas som externa länkar med värden utskriven – det
+ * är ingen varning, bara att värden inte är en av dessa.
  */
-export const KANDA_VARDAR = ["kulturarvsdata.se", "raa.se", "creativecommons.org", "rightsstatements.org"] as const;
+export const KANDA_VARDAR = [
+	"kulturarvsdata.se",
+	"raa.se",
+	"creativecommons.org",
+	"rightsstatements.org",
+	"digitaltmuseum.se",
+	"dimu.org",
+	"riksarkivet.se",
+	"commons.wikimedia.org",
+	"upload.wikimedia.org",
+	"sv.wikipedia.org",
+] as const;
 
 export const FMI_URI_RE = /^http:\/\/kulturarvsdata\.se\/raa\/fmi\/\d{1,20}$/;
 /** Objekt-URI i K-samsök: http://kulturarvsdata.se/{organisation}/{tjänst}/{id}. */
@@ -363,8 +381,10 @@ export class KsamsokRelationSource implements RelationSource {
 		let hamtade = 0;
 		let relUriFel = false;
 		try {
+			// Nästa sida börjar efter de poster som faktiskt kom: K-samsök kan ge färre än
+			// begärt per sida, och ett fast kliv på RELURI_PER_SIDA tappade då poster tyst.
 			for (let sida = 0; sida < RELURI_MAX_SIDOR; sida++) {
-				const sok = parseSearchResponse(await this.client.get(relUriUrl([egen, ...fmi], 1 + sida * RELURI_PER_SIDA)));
+				const sok = parseSearchResponse(await this.client.get(relUriUrl([egen, ...fmi], 1 + hamtade)));
 				totalHits = sok.totalHits;
 				hamtade += sok.records.length;
 				for (const rec of sok.records) {
@@ -410,11 +430,12 @@ export class KsamsokRelationSource implements RelationSource {
 			}
 			if (ejUppslagna > 0) anmarkningar.push(`${ejUppslagna} objekt saknar uppgifter eftersom de inte slogs upp: för dem visas bara relation och adress, och slaget är härlett ur relationstypen.`);
 		}
-		// Relationer utan uppgifter i K-samsök (bl.a. FMI-posterna) visas med bara relation och URI.
+		// Relationer utan uppgifter i K-samsök visas med bara relation och URI. Uppslagen bara om
+		// objektet faktiskt slogs upp; FMI-posterna slås aldrig upp (de är bara identifierare).
 		for (const r of relPerUri.values()) {
 			if (sedda.has(r.uri)) continue;
 			sedda.add(r.uri);
-			objekt.push(bartObjekt(r, egen, FMI_URI_RE.test(r.uri) || uppslagna.has(r.uri)));
+			objekt.push(bartObjekt(r, egen, uppslagna.has(r.uri)));
 		}
 		if (ogiltiga) anmarkningar.push(`${ogiltiga} objekt med en adress som inte är en K-samsök-URI utelämnades.`);
 		if (ofullstandig && !relUriFel) anmarkningar.push(`K-samsök har ${totalHits} objekt kopplade till lämningen och FMI-posterna; de ${hamtade} första hämtades med uppgifter.`);

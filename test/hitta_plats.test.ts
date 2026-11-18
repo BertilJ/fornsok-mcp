@@ -492,6 +492,45 @@ describe("hitta_plats", () => {
 		}
 	});
 
+	it("spärren stoppar också frågor som redan står i kön: tre samtidiga frågor mot ett fördröjt 429 ger ett anrop", async () => {
+		const tider: number[] = [];
+		const f: FetchLike = async () => {
+			tider.push(Date.now());
+			await new Promise((r) => setTimeout(r, 40));
+			return json({ error: "för många" }, 429);
+		};
+		const d = medFetch(f);
+		const svar = await Promise.all(["Kopparvågen", "Stora Stöten", "Knutsbo fäbod"].map((namn) => hittaPlats({ namn }, d)));
+		expect(tider).toHaveLength(1);
+		expect(svar.map((r) => structured(r).openstreetmap).sort()).toEqual(["fel", "sparrad", "sparrad"]);
+		for (const r of svar.filter((x) => structured(x).openstreetmap === "sparrad")) expect(structured(r).anmarkningar.join(" ")).toMatch(/frågades inte: efter ett fel \(svarade 429\)/);
+	});
+
+	it("bara fel som tyder på att tjänsten vill att vi backar spärrar: inte för stort svar eller klientens egen gräns för samtidiga anrop", async () => {
+		const { arBackaFel } = await import("../src/tools/hitta_plats");
+		const { UpstreamError } = await import("../src/errors");
+		// För stort svar (riktig klient, Content-Length över gränsen): fel i svaret, ingen spärr.
+		const stort = statusFetch(() => new Response("[]", { status: 200, headers: { "content-type": "application/json", "content-length": "999999999" } }));
+		const r1 = structured(await hittaPlats({ namn: "Kopparvågen" }, medFetch(stort.fetch)));
+		expect(r1.openstreetmap).toBe("fel");
+		expect(r1.anmarkningar.join(" ")).toMatch(/svaret är för stort/);
+		expect(kv.data.has("nominatim:sparr:v1")).toBe(false);
+		// Klientens egen gräns för samtidiga anrop: ingen spärr.
+		const upptagen = { ...deps, client: { get: async () => { throw new UpstreamError("nominatim", "OpenStreetMap Nominatim: för många samtidiga anrop, försök igen", undefined, "upptaget"); } } as unknown as HittaPlatsDeps["client"] };
+		expect(structured(await hittaPlats({ namn: "Stora Stöten" }, upptagen)).openstreetmap).toBe("fel");
+		expect(kv.data.has("nominatim:sparr:v1")).toBe(false);
+		// Nästa fråga går fram.
+		expect(structured(await hittaPlats({ namn: "Falu gruva" }, deps)).openstreetmap).toBe("fragad");
+		// Nätverksfel spärrar (som tidsgräns, 429, 403 och 5xx ovan).
+		const nat = statusFetch(() => { throw new TypeError("fetch failed"); });
+		await hittaPlats({ namn: "Knutsbo fäbod" }, medFetch(nat.fetch));
+		expect(kv.data.has("nominatim:sparr:v1")).toBe(true);
+		// Klassningen.
+		const fel = (status?: number, art?: "tidsgrans" | "natverk" | "for_stort" | "upptaget") => new UpstreamError("nominatim", "x", status, art);
+		expect([fel(429), fel(403), fel(500), fel(503), fel(undefined, "tidsgrans"), fel(undefined, "natverk")].map(arBackaFel)).toEqual([true, true, true, true, true, true]);
+		expect([fel(400), fel(404), fel(200), fel(undefined, "for_stort"), fel(undefined, "upptaget"), fel()].map(arBackaFel)).toEqual([false, false, false, false, false, false]);
+	});
+
 	it("klienten för Nominatim gör inga omförsök (två anrop med 821 ms mellanrum vid 429 i granskningen)", async () => {
 		const tider: number[] = [];
 		const f: FetchLike = async () => {
@@ -587,8 +626,68 @@ describe("hitta_plats", () => {
 		expect(kommunLika("Munkedals kommun", "Munkedal")).toBe(true);
 		expect(kommunLika("Göteborgs Stad", "Göteborg")).toBe(true);
 		expect(kommunLika("Mora kommun", "Mora")).toBe(true);
+		expect(kommunLika("Upplands-Väsby kommun", "Upplands Väsby")).toBe(true);
+		expect(kommunLika("Region Gotland", "Gotland")).toBe(true);
 		expect(kommunLika("Munkedals kommun", "Ljusdal")).toBe(false);
 		expect(kommunLika(null, "Ljusdal")).toBe(false);
+		expect(kommunLika("kommun", "Ljusdal")).toBe(false);
+	});
+
+	it("kommunLika mot alla 290 kommuner i värdelistans form: rimliga OpenStreetMap-former träffar rätt kommun och ingen annan", async () => {
+		const { kommunLika } = await import("../src/tools/hitta_plats");
+		const { readFileSync } = await import("node:fs");
+		const kommuner = (JSON.parse(readFileSync(new URL("../ingest/data/referens.json", import.meta.url), "utf8")) as { kommuner: Array<{ namn: string }> }).kommuner.map((k) => k.namn);
+		expect(kommuner).toHaveLength(290);
+		// Genitiv som i kommunernas namn ("Falu kommun", "Alingsås kommun", "Mora kommun", "Munkedals kommun").
+		const genitiv = (n: string) => (n === "Falun" ? "Falu" : /[sxz]$/.test(n) || /[aeiouyåäöé]$/i.test(n) ? n : `${n}s`);
+		const byt = (n: string) => [n, n.replace(/-/g, " "), n.replace(/ /g, "-")];
+		const former = (n: string): string[] => {
+			const ut = new Set<string>();
+			for (const v of byt(n)) for (const g of new Set([genitiv(v), v])) for (const efter of [" kommun", " stad", " Stad"]) ut.add(`${g}${efter}`);
+			if (n === "Gotland") ut.add("Region Gotland");
+			return [...ut];
+		};
+		const missar: string[] = [];
+		const falska: string[] = [];
+		const nycklar = kommuner.map((n) => ({ n, f: former(n) }));
+		for (const { n, f } of nycklar) {
+			for (const osm of f) if (!kommunLika(osm, n)) missar.push(`${osm} ≠ ${n}`);
+			for (const annan of kommuner) if (annan !== n && kommunLika(f[0], annan)) falska.push(`${f[0]} = ${annan}`);
+		}
+		expect(missar).toEqual([]);
+		expect(falska).toEqual([]);
+		// Alla former mot alla andra kommuner (inte bara den första formen).
+		let par = 0;
+		for (const { n, f } of nycklar)
+			for (const annan of kommuner)
+				if (annan !== n)
+					for (const osm of f) {
+						par++;
+						if (kommunLika(osm, annan)) falska.push(`${osm} = ${annan}`);
+					}
+		expect(falska).toEqual([]);
+		expect(par).toBeGreaterThan(290 * 289 * 3);
+	});
+
+	it("med län eller kommun begärs tio träffar, och svaret säger tydligt när filtreringen tog bort alla", async () => {
+		const BJURSAS_DALARNA = NOMINATIM_BJURSAS[0];
+		const f = moFetch([BJURSAS_DALARNA, { ...BJURSAS_DALARNA, name: "Bjursås by" }]);
+		const res = await hittaPlats({ namn: "Kopparvågen", lan: "Jämtland" }, medFetch(f.fetch));
+		const r = structured(res);
+		expect(f.calls[0].searchParams.get("limit")).toBe("10");
+		expect(checkAllowed("GET", f.calls[0].href).id).toBe("nominatim.search");
+		expect(r.kalla).toBe("ingen");
+		expect(r.anmarkningar.join(" ")).toMatch(/^OpenStreetMap gav ingen kandidat: alla 2 träffar i OpenStreetMap utanför Jämtlands län \(eller utan känd kommun\/län\) togs bort\. Orten kan ändå finnas där – OpenStreetMap ger bara de 10 bästa träffarna/);
+		// Kommunfiltret i Nominatims form: Upplands Väsby kommun mot Upplands-Väsby kommun.
+		const vasby = { lat: "59.5184", lon: "17.9113", category: "place", type: "town", name: "Upplands Väsby", display_name: "Upplands Väsby, Upplands-Väsby kommun, Stockholms län, Sverige", address: { town: "Upplands Väsby", municipality: "Upplands-Väsby kommun", county: "Stockholms län" } };
+		const g = moFetch([vasby]);
+		const r2 = structured(await hittaPlats({ namn: "Väsby", kommun: "Upplands Väsby" }, medFetch(g.fetch)));
+		expect(g.calls[0].searchParams.get("limit")).toBe("10");
+		expect(r2.kandidater.map((k: S) => k.namn)).toEqual(["Upplands Väsby"]);
+		// Utan län och kommun: fem som förut (samma cachenyckel som tidigare sparade svar).
+		const h = moFetch([]);
+		await hittaPlats({ namn: "Kopparvågen" }, medFetch(h.fetch));
+		expect(h.calls[0].searchParams.get("limit")).toBe("5");
 	});
 
 	it("listan över tillåtna anrop: bara sökning i Sverige med kända parametrar", () => {

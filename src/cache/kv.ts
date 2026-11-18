@@ -26,8 +26,13 @@ export const RELATERAT_TOM_KV_TTL_S = 24 * 60 * 60;
 /** Nycklarna har version så att ändrad form kan rullas ut utan att läsa gammalt. */
 export const DOMANER_KEY = "domaner:v1";
 export const dokumentKey = (uuid: string) => `dokument:v1:${uuid.toLowerCase()}`;
-/** Höjs när hämtningen eller klassningen ändras (v2: klassning av ej uppslagna objekt, länkkontroll, okänd koppling). */
-export const RELATERAT_VERSION = 2;
+/**
+ * Höjs när hämtningen eller klassningen ändras (v2: klassning av ej uppslagna
+ * objekt, länkkontroll, okänd koppling; v3: sidindelningen i relUri kliver efter
+ * de poster som kom, så sparade listor kan sakna objekt, och FMI-poster märks
+ * som ej uppslagna).
+ */
+export const RELATERAT_VERSION = 3;
 export const relateratKey = (uuid: string) => `relaterat:v${RELATERAT_VERSION}:${uuid.toLowerCase()}`;
 
 export async function kvCached<T>(

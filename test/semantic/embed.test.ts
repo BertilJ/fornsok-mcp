@@ -5,7 +5,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MODELL } from "../../src/semantic/bindings";
-import { AI_BATCH, arIndatafel, arTillfalligtAiFel, BELAGG_ANNAN_LYCKADES, BELAGG_INDATAFEL, embedStatus, KONTROLLTEXT, runEmbedBatch } from "../../src/semantic/embed";
+import { AI_BATCH, arIndatafel, arTillfalligtAiFel, BELAGG_ANNAN_LYCKADES, BELAGG_INDATAFEL, BELAGG_TILLFALLIGT, embedStatus, KONTROLLTEXT, runEmbedBatch } from "../../src/semantic/embed";
 import { createSemanticSearch, semanticSearch } from "../../src/semantic/search";
 import { runSync } from "../../src/sync/run";
 import { appFixture, emptyDb, fakeRaa, flodePost, openD1, UUID } from "../sync/helpers";
@@ -148,7 +148,7 @@ describe("runEmbedBatch", () => {
 		expect(hits[0].uuid).toBe(UUID.L2001_646);
 	});
 
-	it("tillfälliga fel i Workers AI (5xx, tidsgräns, kvot) förbrukar inga försök och gör inte omfånget klart", async () => {
+	it("tillfälliga fel i Workers AI (5xx, tidsgräns, kvot) för allt: avbrott, inga försök förbrukas, omfånget blir inte klart", async () => {
 		insertLamning(db, { uuid: uuidN(1), beskrivning: "Kolbotten, rund, 12 m diam." });
 		insertLamning(db, { uuid: uuidN(2), beskrivning: "Fångstgrop, rund, 3 m i diameter." });
 		const err = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -158,12 +158,13 @@ describe("runEmbedBatch", () => {
 				ai.run = async () => {
 					throw typeof msg === "string" ? new Error(msg) : msg;
 				};
-				for (let k = 0; k < 4; k++) expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 0, klar: false });
+				for (let k = 0; k < 4; k++) await expect(runEmbedBatch(env())).rejects.toThrow(/avbrott/);
 			}
 		} finally {
 			err.mockRestore();
 		}
 		expect(db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get()).toEqual({ n: 0 });
+		expect(db.prepare("SELECT count(*) AS n FROM synk_status WHERE nyckel = 'inbaddning_klar'").get()).toEqual({ n: 0 });
 		ai = new FakeAi();
 		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 2, klar: true });
 	});
@@ -388,21 +389,50 @@ describe("runEmbedBatch", () => {
 		expect(db.prepare("SELECT uuid FROM inbaddning").all()).toEqual([{ uuid: uuidN(4) }]);
 	});
 
-	it("en lämning vars text fallerar medan tjänsten fungerar (kontrolltexten går igenom): felet bokförs med belägg, nästa körning försöker igen", async () => {
+	it("en ensam lämning vars text fallerar när bara kontrolltexten går igenom: avbrott, inget bokförs (kontrolltexten är inget belägg)", async () => {
 		insertLamning(db, { uuid: uuidN(1), beskrivning: "Kolbotten, rund, 12 m diam." });
 		ai.failIf = (t) => t.includes("Kolbotten");
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			for (let k = 0; k < 4; k++) await expect(runEmbedBatch(env())).rejects.toThrow(/delvis avbrott.*kontrolltexten gick igenom, men den räknas inte som belägg/);
+			expect(String(warn.mock.calls[0][0])).toMatch(/kontrolltexten gick igenom men verkliga texter fallerar/);
+		} finally {
+			err.mockRestore();
+			warn.mockRestore();
+		}
+		expect(ai.calls).toEqual([[KONTROLLTEXT], [KONTROLLTEXT], [KONTROLLTEXT], [KONTROLLTEXT]]);
+		expect(db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get()).toEqual({ n: 0 });
+		ai.failIf = undefined;
+		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 1, klar: true });
+	});
+
+	it("en ensam lämning vars text fallerar medan en verklig text (referenstexten) går igenom: bokförs med belägg efter två försök, nästa körning försöker igen", async () => {
+		insertLamning(db, { uuid: uuidN(1), beskrivning: "Fångstgrop, rund, 3 m i diameter." });
+		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 1, klar: true });
+		insertLamning(db, { uuid: uuidN(2), beskrivning: "Kolbotten, rund, 12 m diam." });
+		avstam(db);
+		const anrop: string[][] = [];
+		const inner = new FakeAi();
+		ai.run = async (model: "@cf/baai/bge-m3", input: { text: string[] }) => {
+			anrop.push(input.text);
+			if (input.text.some((t) => t.includes("Kolbotten"))) throw new Error("InferenceUpstreamError: Unknown internal error");
+			return inner.run(model, input as never);
+		};
 		const err = vi.spyOn(console, "error").mockImplementation(() => {});
 		try {
 			expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 0, fel: 1, klar: false });
 		} finally {
 			err.mockRestore();
 		}
-		expect(ai.calls).toEqual([[KONTROLLTEXT]]);
-		expect(db.prepare("SELECT count(*) AS n FROM inbaddning").get()).toEqual({ n: 0 });
+		const ref = "Fångstgrop. Fångstgrop, rund, 3 m i diameter.";
+		const kol = "Fångstgrop. Kolbotten, rund, 12 m diam.";
+		// Texten, referenstexten (en verklig text: tjänsten fungerar), texten igen, referenstexten efter det.
+		expect(anrop).toEqual([[kol], [ref], [kol], [ref]]);
 		const rad = db.prepare("SELECT forsok, senaste_fel FROM inbaddning_fel").get() as { forsok: number; senaste_fel: string };
 		expect(rad.forsok).toBe(1);
-		expect(rad.senaste_fel.startsWith(BELAGG_ANNAN_LYCKADES)).toBe(true);
-		ai.failIf = undefined;
+		expect(rad.senaste_fel).toBe(`${BELAGG_ANNAN_LYCKADES}InferenceUpstreamError: Unknown internal error`);
+		ai = new FakeAi();
 		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 1, klar: true });
 		// Lyckad inbäddning tar bort felraden.
 		expect(db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get()).toEqual({ n: 0 });
@@ -554,17 +584,20 @@ describe("runEmbedBatch", () => {
 		expect(db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get()).toEqual({ n: 0 });
 	});
 
-	it("tillfälliga fel i många delar: körningen ger upp efter ett begränsat antal anrop", async () => {
+	it("tillfälliga fel i många delar: körningen ger upp efter två anrop (delen och kontrolltexten)", async () => {
 		for (let i = 1; i <= 700; i++) insertLamning(db, { uuid: uuidN(i), beskrivning: `Fångstgrop nummer ${i}, rund, 3 m i diameter.` });
+		let anrop = 0;
 		ai.run = async () => {
+			anrop++;
 			throw new Error("InferenceUpstreamError: 503 Service Unavailable");
 		};
 		const err = vi.spyOn(console, "error").mockImplementation(() => {});
 		try {
-			await expect(runEmbedBatch(env())).rejects.toThrow(/fallerade 12 gånger i körningen/);
+			await expect(runEmbedBatch(env())).rejects.toThrow(/både texterna och kontrolltexten fallerade/);
 		} finally {
 			err.mockRestore();
 		}
+		expect(anrop).toBe(2);
 		expect(db.prepare("SELECT count(*) AS n FROM inbaddning_fel").get()).toEqual({ n: 0 });
 	});
 
@@ -588,6 +621,190 @@ describe("runEmbedBatch", () => {
 		sql.length = 0;
 		await runEmbedBatch(logged);
 		expect(sql.some((q) => q.includes("FROM lamning l"))).toBe(true);
+	});
+
+	// ------------------------------------------------ beslutsregeln för fel i Workers AI (en gren per test)
+
+	/** Styrd AI: `fel(texter, n)` ger ett fel att kasta för anrop nummer n (alla anrop räknas), annars null. */
+	function styrdAi(fel: (texter: string[], n: number) => Error | null): string[][] {
+		const anrop: string[][] = [];
+		const inner = new FakeAi();
+		ai.run = async (model: "@cf/baai/bge-m3", input: { text: string[] }) => {
+			anrop.push(input.text);
+			const f = fel(input.text, anrop.length);
+			if (f) throw f;
+			return inner.run(model, input as never);
+		};
+		return anrop;
+	}
+	const tyst = () => {
+		const e = vi.spyOn(console, "error").mockImplementation(() => {});
+		const w = vi.spyOn(console, "warn").mockImplementation(() => {});
+		return () => {
+			e.mockRestore();
+			w.mockRestore();
+		};
+	};
+	const felrader = () => db.prepare("SELECT uuid, forsok, senaste_fel FROM inbaddning_fel ORDER BY uuid").all() as Array<{ uuid: string; forsok: number; senaste_fel: string }>;
+	const lamningar = (n: number, text = (i: number) => `Fångstgrop nummer ${i}, rund, 3 m i diameter.`) => {
+		for (let i = 1; i <= n; i++) insertLamning(db, { uuid: uuidN(i), beskrivning: text(i) });
+	};
+
+	it("regeln, allt lyckas: inga felrader, ingen kontrolltext", async () => {
+		lamningar(120);
+		const anrop = styrdAi(() => null);
+		expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 120, klar: true });
+		expect(anrop.map((a) => a.length)).toEqual([50, 50, 20]);
+		expect(felrader()).toEqual([]);
+	});
+
+	it("regeln, en text ger okänt fel: friska texter bäddas in, texten prövas ensam två gånger och bokförs med belägg", async () => {
+		lamningar(120, (i) => (i === 64 ? "TRASIG fångstgrop." : `Fångstgrop nummer ${i}, rund, 3 m i diameter.`));
+		const anrop = styrdAi((t) => (t.some((x) => x.includes("TRASIG")) ? new Error("InferenceUpstreamError: Unknown internal error") : null));
+		const atersta = tyst();
+		try {
+			expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 119, fel: 1, klar: false });
+		} finally {
+			atersta();
+		}
+		expect(anrop.filter((a) => a.length === 1 && a[0].includes("TRASIG"))).toHaveLength(2);
+		expect(anrop.flat()).not.toContain(KONTROLLTEXT);
+		expect(felrader()).toEqual([{ uuid: uuidN(64), forsok: 1, senaste_fel: `${BELAGG_ANNAN_LYCKADES}InferenceUpstreamError: Unknown internal error` }]);
+	});
+
+	it("regeln, en text ger \"tillfälligt\" fel varje gång (granskningens 503-fall): friska texter kommer igenom, texten prövas en gång per dygn och hoppas över efter tre dygn", async () => {
+		lamningar(120, (i) => (i === 7 ? "SJUK fångstgrop." : `Fångstgrop nummer ${i}, rund, 3 m i diameter.`));
+		let sjuk = true;
+		const anrop = styrdAi((t) => (sjuk && t.some((x) => x.includes("SJUK")) ? new Error("InferenceUpstreamError: 503 Service Unavailable") : null));
+		const tidpunkt = (d: number, h = 4, m = 0) => ({ now: new Date(Date.UTC(2026, 10, 1 + d, h, m)) });
+		const atersta = tyst();
+		try {
+			// Dygn 0: alla friska bäddas in i första körningen (tidigare: 70, sedan 0 i varje körning).
+			expect(await runEmbedBatch(env(), tidpunkt(0))).toMatchObject({ inbaddade: 119, fel: 1, klar: false });
+			expect(felrader()).toEqual([{ uuid: uuidN(7), forsok: 1, senaste_fel: `${BELAGG_TILLFALLIGT}InferenceUpstreamError: 503 Service Unavailable` }]);
+			// Samma dygn: texten vilar; inga anrop, och omfånget är klart.
+			let n = anrop.length;
+			expect(await runEmbedBatch(env(), tidpunkt(0, 4, 15))).toMatchObject({ inbaddade: 0, klar: true });
+			expect(await runEmbedBatch(env(), tidpunkt(0, 23, 45))).toMatchObject({ inbaddade: 0, klar: true });
+			expect(anrop.length).toBe(n);
+			// Dygn 1 och 2: ett nytt försök per dygn (texten, referenstexten, texten, referenstexten).
+			for (const [d, forsok] of [[1, 2], [2, 3]] as const) {
+				n = anrop.length;
+				expect(await runEmbedBatch(env(), tidpunkt(d))).toMatchObject({ inbaddade: 0, fel: 1, klar: false });
+				expect(anrop.length - n).toBe(4);
+				expect(await runEmbedBatch(env(), tidpunkt(d, 4, 15))).toMatchObject({ klar: true });
+				expect(felrader()[0].forsok).toBe(forsok);
+			}
+			// Dygn 3–8: överhoppad (tre försök på olika dygn), inga anrop.
+			n = anrop.length;
+			for (const d of [3, 5, 8]) expect(await runEmbedBatch(env(), tidpunkt(d))).toMatchObject({ inbaddade: 0, klar: true });
+			expect(anrop.length).toBe(n);
+			// Sju dygn efter senaste försöket prövas den igen; nu fungerar den.
+			sjuk = false;
+			expect(await runEmbedBatch(env(), tidpunkt(9))).toMatchObject({ inbaddade: 1, klar: true });
+		} finally {
+			atersta();
+		}
+		expect(vec.store.size).toBe(120);
+		expect(felrader()).toEqual([]);
+	});
+
+	it("regeln, allt fallerar med okänt fel (även kontrolltexten): avbrott efter två anrop, inget bokförs", async () => {
+		lamningar(120);
+		const anrop = styrdAi(() => new Error("InferenceUpstreamError: Unknown internal error"));
+		const atersta = tyst();
+		try {
+			for (let k = 0; k < 3; k++) await expect(runEmbedBatch(env())).rejects.toThrow(/avbrott/);
+		} finally {
+			atersta();
+		}
+		expect(anrop.length).toBe(6);
+		expect(felrader()).toEqual([]);
+	});
+
+	it("regeln, kontrolltexten lyckas men alla verkliga texter fallerar (granskningens fall, 1 500 lämningar): delvis avbrott efter nio anrop, inget bokförs, inget hoppas över", async () => {
+		lamningar(1500);
+		const anrop = styrdAi((t) => (t.length === 1 && t[0] === KONTROLLTEXT ? null : new Error("InferenceUpstreamError: Unknown internal error")));
+		const atersta = tyst();
+		try {
+			for (let k = 0; k < 4; k++) {
+				const n = anrop.length;
+				await expect(runEmbedBatch(env())).rejects.toThrow(/8 anrop i följd fallerade utan att någon verklig text lyckades emellan \(kontrolltexten gick igenom, men den räknas inte som belägg\); inget bokfört/);
+				// Åtta delar och kontrolltexten (tidigare 49 anrop och 22 bokförda per körning).
+				expect(anrop.length - n).toBe(9);
+				expect(felrader()).toEqual([]);
+			}
+		} finally {
+			atersta();
+		}
+		ai = new FakeAi();
+		expect(await runEmbedBatch(env(), { max: 1500 })).toMatchObject({ inbaddade: 1500, klar: true });
+	});
+
+	it("regeln, verkliga texter fallerar och en redan inbäddad lämning finns: referenstexten fallerar också, avbrott efter två anrop", async () => {
+		lamningar(1);
+		await runEmbedBatch(env());
+		for (let i = 2; i <= 31; i++) insertLamning(db, { uuid: uuidN(i), beskrivning: `Kolbotten nummer ${i}.` });
+		avstam(db);
+		const anrop = styrdAi((t) => (t.length === 1 && t[0] === KONTROLLTEXT ? null : new Error("InferenceUpstreamError: Unknown internal error")));
+		const atersta = tyst();
+		try {
+			await expect(runEmbedBatch(env())).rejects.toThrow(/referenstexten, en redan inbäddad lämning, fallerade också; inget bokfört/);
+		} finally {
+			atersta();
+		}
+		expect(anrop.map((a) => a.length)).toEqual([30, 1]);
+		expect(anrop[1][0]).toMatch(/Fångstgrop nummer 1/);
+		expect(felrader()).toEqual([]);
+	});
+
+	it("regeln, tjänsten återhämtar sig mitt i en körning: texter som fallerade under avbrottet bäddas in i andra försöket, inget bokförs", async () => {
+		lamningar(3);
+		let verkliga = 0;
+		const anrop = styrdAi((t) => (t[0] !== KONTROLLTEXT && ++verkliga <= 4 ? new Error("InferenceUpstreamError: Unknown internal error") : null));
+		const atersta = tyst();
+		try {
+			const r = await runEmbedBatch(env());
+			expect(r).toMatchObject({ inbaddade: 3, klar: true });
+			expect(r.fel ?? 0).toBe(0);
+		} finally {
+			atersta();
+		}
+		expect(anrop.flat()).toContain(KONTROLLTEXT);
+		expect(felrader()).toEqual([]);
+		expect(vec.store.size).toBe(3);
+	});
+
+	it("regeln, tjänsten går ned mitt i körningen: avbrott efter åtta fel i följd, det som redan bäddats in står sig, inget bokförs", async () => {
+		lamningar(120);
+		const anrop = styrdAi((_t, n) => (n > 2 ? new Error("InferenceUpstreamError: Unknown internal error") : null));
+		const atersta = tyst();
+		try {
+			await expect(runEmbedBatch(env())).rejects.toThrow(/8 anrop i följd fallerade/);
+		} finally {
+			atersta();
+		}
+		expect(anrop.length).toBe(10);
+		expect(vec.store.size).toBe(100);
+		expect(felrader()).toEqual([]);
+	});
+
+	it("engångsrensning v2: bokförda fel med det gamla belägget (där kontrolltexten räknades) tas bort och prövas igen", async () => {
+		lamningar(3);
+		const h = (u: string) => (db.prepare("SELECT hash FROM lamning WHERE uuid = ?").get(u) as { hash: string }).hash;
+		const ins = db.prepare("INSERT INTO inbaddning_fel (uuid, rad_hash, forsok, senaste_fel, andrad) VALUES (?, ?, 3, ?, ?)");
+		const nu = new Date().toISOString();
+		ins.run(uuidN(1), h(uuidN(1)), "belägg: annan text i körningen lyckades; InferenceUpstreamError: Unknown internal error", nu);
+		ins.run(uuidN(2), h(uuidN(2)), `${BELAGG_TILLFALLIGT}503 Service Unavailable`, nu);
+		ins.run(uuidN(3), h(uuidN(3)), `${BELAGG_ANNAN_LYCKADES}AiError: 3010: Invalid input`, nu);
+		const atersta = tyst();
+		try {
+			expect(await runEmbedBatch(env())).toMatchObject({ inbaddade: 1, klar: true });
+		} finally {
+			atersta();
+		}
+		expect(vec.store.has(uuidN(1))).toBe(true);
+		expect(felrader().map((r) => r.uuid)).toEqual([uuidN(2), uuidN(3)]);
 	});
 
 	it("kräver bindningarna", async () => {

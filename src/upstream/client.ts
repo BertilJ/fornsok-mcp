@@ -214,7 +214,7 @@ export class UpstreamClient {
 		try {
 			return await this.semaphore(source).run(fn);
 		} catch (err) {
-			if (err instanceof SemaphoreTimeoutError) throw new UpstreamError(source, `${SOURCE_NAMES[source]}: för många samtidiga anrop, försök igen`);
+			if (err instanceof SemaphoreTimeoutError) throw new UpstreamError(source, `${SOURCE_NAMES[source]}: för många samtidiga anrop, försök igen`, undefined, "upptaget");
 			throw err;
 		}
 	}
@@ -247,7 +247,7 @@ export class UpstreamClient {
 			const msg = isTimeout(lastError)
 				? `${SOURCE_NAMES[source]} svarade inte inom ${Math.round(this.timeoutMs / 1000)} s`
 				: `${SOURCE_NAMES[source]} gick inte att nå`;
-			throw new UpstreamError(source, msg);
+			throw new UpstreamError(source, msg, undefined, isTimeout(lastError) ? "tidsgrans" : "natverk");
 		});
 	}
 
@@ -288,10 +288,10 @@ export class UpstreamClient {
 		const len = parseContentLength(res.headers.get("content-length"));
 		if (len !== null && len > this.maxBodyBytes) {
 			await res.body?.cancel();
-			throw new UpstreamError(source, `${SOURCE_NAMES[source]}: svaret är för stort (${len} byte)`);
+			throw new UpstreamError(source, `${SOURCE_NAMES[source]}: svaret är för stort (${len} byte)`, undefined, "for_stort");
 		}
 		const bytes = await readLimited(res, this.maxBodyBytes);
-		if (!bytes) throw new UpstreamError(source, `${SOURCE_NAMES[source]}: svaret är för stort`);
+		if (!bytes) throw new UpstreamError(source, `${SOURCE_NAMES[source]}: svaret är för stort`, undefined, "for_stort");
 		return new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(bytes);
 	}
 }

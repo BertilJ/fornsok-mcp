@@ -19,7 +19,11 @@
  *    - vid 429, 403, 5xx, tidsgräns eller nätverksfel spärras tjänsten i minst
  *      10 minuter (längre om `Retry-After` säger det, högst ett dygn). Spärren
  *      ligger i KV och i isolatet, och under den frågas Nominatim inte alls;
- *      svaret säger då att OpenStreetMap inte frågades,
+ *      svaret säger då att OpenStreetMap inte frågades. Spärren prövas både
+ *      innan frågan ställs i kön och omedelbart före anropet, så att frågor som
+ *      redan väntar i kön inte skickas efter ett fel. Fel som inte tyder på att
+ *      tjänsten vill att vi backar (för stort svar, klientens egen gräns för
+ *      samtidiga anrop, ett svar som inte går att tolka) spärrar inte,
  *    - identifierande User-Agent: projektets userAgent(CONTACT_URL),
  *    - svaren (även tomma) sparas 30 dygn i KV, så samma fråga inte skickas igen,
  *    - inget autocomplete, inga systematiska frågor: högst ett anrop per fråga,
@@ -29,7 +33,8 @@
  * Ort och område (socken/kommun) med samma namn paras bara ihop när de
  * rimligen är samma plats (sammaPlats); annars visas de som skilda kandidater
  * utan rekommendation. OpenStreetMap-träffar utanför angivet län eller kommun
- * tas bort.
+ * tas bort; då begärs fler träffar (NOMINATIM_LIMIT_FILTRERAD i stället för
+ * NOMINATIM_LIMIT), och svaret säger det när filtreringen tog bort alla.
  *
  * Registreras inte här; se registerHittaPlats och createHittaPlatsDeps.
  */
@@ -50,6 +55,14 @@ import { READ_ONLY, citat, kallrad, ok, rad, runTool } from "./common";
 export const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
 export const NOMINATIM_TTL_S = 30 * 24 * 60 * 60;
 export const NOMINATIM_MIN_MELLANRUM_MS = 1100;
+/** Träffar som begärs från Nominatim. */
+export const NOMINATIM_LIMIT = 5;
+/**
+ * Träffar som begärs när län eller kommun är angivet: träffarna filtreras i
+ * efterhand (Nominatims fritext begränsar inte strikt), så med fem kunde alla
+ * försvinna för vanliga namn. 10 är det största listan över tillåtna anrop godtar.
+ */
+export const NOMINATIM_LIMIT_FILTRERAD = 10;
 /** Spärr efter fel hos Nominatim (429, 403, 5xx, tidsgräns, nätverksfel). */
 export const NOMINATIM_SPARR_MS = 10 * 60_000;
 /** Längsta spärr, även om `Retry-After` begär mer. */
@@ -454,6 +467,10 @@ async function iTur<T>(deps: HittaPlatsDeps, fn: () => Promise<T>): Promise<T> {
 			const senast = Math.max(senasteAnrop, await senasteIKv(deps));
 			const vanta = senast + NOMINATIM_MIN_MELLANRUM_MS - now();
 			if (vanta > 0) await sleep(Math.min(vanta, NOMINATIM_MIN_MELLANRUM_MS));
+			// En fråga som stod före i kön kan ha fått ett fel och spärrat tjänsten medan
+			// den här väntade: pröva spärren igen, omedelbart före anropet.
+			const sparr = await lasNominatimSparr(deps);
+			if (sparr) throw new NominatimSparrError(sparr);
 			senasteAnrop = now();
 			if (deps.kv) {
 				try {
@@ -548,6 +565,16 @@ async function sattNominatimSparr(deps: HittaPlatsDeps, orsak: string, retryAfte
 	return sp;
 }
 
+/**
+ * Tyder felet på att Nominatim vill att vi backar? 429, 403 och 5xx, samt
+ * tidsgräns och nätverksfel (ingen status). Inte: för stort svar, klientens
+ * egen gräns för samtidiga anrop, övriga 4xx och svar som inte går att tolka.
+ */
+export function arBackaFel(e: UpstreamError): boolean {
+	if (typeof e.status === "number") return e.status === 429 || e.status === 403 || e.status >= 500;
+	return e.art === "tidsgrans" || e.art === "natverk";
+}
+
 /** Bara för test: kön med egna gränser. */
 export function sattNominatimKo(opts: { maxHoldMs?: number; maxWaitMs?: number; pollMs?: number }): void {
 	ko = new Semaphore(1, opts);
@@ -580,22 +607,23 @@ export function viewbox(bb: readonly number[] | null | undefined): string | null
 	return [bb[0] - m, bb[1] - m, bb[2] + m, bb[3] + m].map((x) => x.toFixed(4)).join(",");
 }
 
-export function nominatimUrl(q: string, vb?: string | null): string {
+export function nominatimUrl(q: string, vb?: string | null, limit = NOMINATIM_LIMIT): string {
 	const u = new URL(NOMINATIM_URL);
 	u.searchParams.set("q", q);
 	u.searchParams.set("countrycodes", "se");
 	u.searchParams.set("format", "jsonv2");
-	u.searchParams.set("limit", "5");
+	u.searchParams.set("limit", String(Math.max(1, Math.min(NOMINATIM_LIMIT_FILTRERAD, Math.trunc(limit)))));
 	u.searchParams.set("addressdetails", "1");
 	u.searchParams.set("accept-language", "sv");
 	if (vb) u.searchParams.set("viewbox", vb);
 	return u.href;
 }
 
-async function cacheKey(q: string, vb: string | null): Promise<string> {
+async function cacheKey(q: string, vb: string | null, limit: number): Promise<string> {
+	// Standardantalet ger samma nyckel som före NOMINATIM_LIMIT_FILTRERAD (sparade svar gäller).
 	const b = await crypto.subtle.digest(
 		"SHA-256",
-		new TextEncoder().encode(`${q.toLocaleLowerCase("sv")}|${vb ?? ""}`),
+		new TextEncoder().encode(`${q.toLocaleLowerCase("sv")}|${vb ?? ""}${limit === NOMINATIM_LIMIT ? "" : `|${limit}`}`),
 	);
 	return `nominatim:v2:${[...new Uint8Array(b)]
 		.map((x) => x.toString(16).padStart(2, "0"))
@@ -608,8 +636,9 @@ export async function nominatim(
 	deps: HittaPlatsDeps,
 	q: string,
 	vb: string | null = null,
+	limit = NOMINATIM_LIMIT,
 ): Promise<{ traffar: NominatimTraff[]; cachad: boolean }> {
-	const key = await cacheKey(q, vb);
+	const key = await cacheKey(q, vb, limit);
 	if (deps.kv) {
 		try {
 			const hit = await deps.kv.get(key, "json");
@@ -623,16 +652,17 @@ export async function nominatim(
 	}
 	const sparr = await lasNominatimSparr(deps);
 	if (sparr) throw new NominatimSparrError(sparr);
-	const url = nominatimUrl(q, vb);
+	const url = nominatimUrl(q, vb, limit);
 	const source = checkAllowed("GET", url).source;
 	const r = await iTur(deps, async () => {
 		try {
 			return await deps.client.get(url);
 		} catch (e) {
-			// Tidsgräns eller nätverksfel (klienten gör inget omförsök): spärra.
-			if (e instanceof UpstreamError) {
+			// Tidsgräns eller nätverksfel (klienten gör inget omförsök): spärra. Ett för stort svar
+			// eller klientens egen gräns för samtidiga anrop säger inget om tjänsten: ingen spärr.
+			if (e instanceof UpstreamError && arBackaFel(e)) {
 				const sp = await sattNominatimSparr(deps, e.message, null);
-				throw new UpstreamError(source, `${e.message}; nästa fråga dit tidigast ${klockslag(sp.till)}`, e.status);
+				throw new UpstreamError(source, `${e.message}; nästa fråga dit tidigast ${klockslag(sp.till)}`, e.status, e.art);
 			}
 			throw e;
 		}
@@ -735,15 +765,32 @@ export function behoverOrt(namn: string, kandidater: readonly Kandidat[]): boole
 }
 
 /**
+ * Kommunnamn i jämförbar form: gemener, bindestreck och blanksteg som ett
+ * blanksteg, utan "Region " först och " kommun"/" stad" sist ("Upplands-Väsby
+ * kommun" → "upplands väsby", "Region Gotland" → "gotland").
+ */
+export function kommunNyckel(x: string): string {
+	return normalizeName(x)
+		.replace(/[\s\u2010-\u2014-]+/g, " ")
+		.trim()
+		.replace(/^region /, "")
+		.replace(/ (kommun|stad)$/, "")
+		.trim();
+}
+
+/**
  * Samma kommun? Nominatim ger kommunen som "Falu kommun", "Munkedals kommun",
- * "Göteborgs Stad"; indexet som "Falun", "Munkedal", "Göteborg". Jämför utan
- * "kommun"/"stad" och med genitiv-s eller Falu/Falun-formen.
+ * "Göteborgs Stad", "Region Gotland", "Upplands Väsby kommun"; indexet som
+ * "Falun", "Munkedal", "Göteborg", "Gotland", "Upplands Väsby". Jämför
+ * kommunNyckel, med eller utan genitiv-s och med Falu/Falun-formen (-n). Prövat
+ * mot alla 290 kommunnamn i indexets form (test/hitta_plats.test.ts), utan
+ * att två olika kommuner räknas som lika.
  */
 export function kommunLika(a: string | null, b: string | null): boolean {
 	if (!a || !b) return false;
-	const f = (x: string) => normalizeName(x).replace(/\s+(kommun|stad)$/, "");
-	const x = f(a);
-	const y = f(b);
+	const x = kommunNyckel(a);
+	const y = kommunNyckel(b);
+	if (!x || !y) return false;
 	return x === y || x === `${y}s` || y === `${x}s` || x === `${y}n` || y === `${x}n`;
 }
 
@@ -836,15 +883,20 @@ export async function hittaPlats(args: HittaPlatsArgs, deps: HittaPlatsDeps) {
 				// Ett enda område i indexet: dess utbredning skickas som föredraget område (viewbox,
 				// utan bounded), så att orten där får företräde utan att andra orter utesluts.
 				const vb = omraden.length === 1 ? viewbox(omraden[0].utbredning) : null;
-				const { traffar, cachad } = await nominatim(deps, nominatimFraga(namn, kommun, lan), vb);
+				// Med län eller kommun filtreras träffarna i efterhand: begär fler, så att färre försvinner.
+				const limit = lan || kommun ? NOMINATIM_LIMIT_FILTRERAD : NOMINATIM_LIMIT;
+				const { traffar, cachad } = await nominatim(deps, nominatimFraga(namn, kommun, lan), vb, limit);
 				osm = cachad ? "sparat" : "nu";
 				osmLage = cachad ? "sparat_svar" : "fragad";
 				const alla = nominatimKandidater(traffar);
 				// Bara träffar i angivet län och kommun (Nominatims fritext begränsar inte strikt).
 				franOsm = alla.filter((k) => (!lan || k.lan === lan) && (!kommun || kommunLika(k.kommun, kommun)));
 				const bort = alla.length - franOsm.length;
-				if (bort)
-					anmarkningar.push(`${bort} ${bort === 1 ? "träff" : "träffar"} i OpenStreetMap utanför ${[kommun ? `${kommun} kommun` : null, lan ? (findLan(lan)?.fullt ?? lan) : null].filter(Boolean).join(", ")} (eller utan känd kommun/län) togs bort.`);
+				const utanfor = [kommun ? `${kommun} kommun` : null, lan ? (findLan(lan)?.fullt ?? lan) : null].filter(Boolean).join(", ");
+				if (bort && !franOsm.length)
+					anmarkningar.push(`OpenStreetMap gav ingen kandidat: alla ${bort} ${bort === 1 ? "träff" : "träffar"} i OpenStreetMap utanför ${utanfor} (eller utan känd kommun/län) togs bort. Orten kan ändå finnas där – OpenStreetMap ger bara de ${limit} bästa träffarna för namnet i hela Sverige. Pröva annan stavning, eller utan kommun och län och välj bland träffarna.`);
+				else if (bort)
+					anmarkningar.push(`${bort} ${bort === 1 ? "träff" : "träffar"} i OpenStreetMap utanför ${utanfor} (eller utan känd kommun/län) togs bort.`);
 				if (franOsm.length) anmarkningar.push(`OpenStreetMap Nominatim${cachad ? " (sparat svar)" : ""}: ${NOMINATIM_ATTRIBUTION}.`);
 			} catch (e) {
 				if (!(e instanceof UpstreamError)) throw e;

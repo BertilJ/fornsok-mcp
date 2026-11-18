@@ -233,7 +233,7 @@ describe("K-samsök: relaterat material", () => {
 		const viaFmi = dok.filter((o) => !direkt.has(o.uri) && !/\/raa\/lamning\//.test(o.uri));
 		const utanRef = viaFmi.filter((o) => !o.referenser.some((r) => fmi.includes(r)));
 		k.krav(utanRef.length === 0, "pres:references.pres:reference", `${utanRef.length} av ${viaFmi.length} objekt funna via en FMI-post saknar referens till FMI-posten, t.ex. ${utanRef[0]?.uri}`);
-		// Länkarna går till kända värdar (annars märks de som okänd värd i svaret).
+		// Länkarna för testposten går till kända värdar (andra står som "extern länk, värd: …" i svaret).
 		const vardar = [...new Set(dok.flatMap((o) => [o.url, ...o.bilder.flatMap((b) => [b.miniatyr, b.stor, b.licens_url])]).filter((u): u is string => !!u).map((u) => lankVard(u)).filter((v) => !v.kand).map((v) => v.vard))];
 		k.krav(vardar.length === 0, "pres:representations / pres:image", `länkar till värdar utanför listan över kända värdar: ${JSON.stringify(vardar)}`);
 		k.klar();

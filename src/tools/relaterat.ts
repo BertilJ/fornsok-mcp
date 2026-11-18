@@ -165,11 +165,12 @@ function kortad(s: string | null, max: number): string | null {
 /**
  * En länk ur K-samsök med värden utskriven. Bara adresser som klarat sakerUrl
  * (normaliserade, utan användaruppgifter) når hit. Länkar till andra värdar än
- * KANDA_VARDAR märks; servern påstår inget om vart en länk går utöver värden.
+ * KANDA_VARDAR märks som externa, sakligt och utan varning (oftast ett museums
+ * egen bildserver); servern påstår inget om vart en länk går utöver värden.
  */
 export function lank(url: string): string {
 	const { vard, kand } = lankVard(url);
-	return kand ? `${rad(url)} (${rad(vard)})` : `extern länk enligt K-samsök (okänd värd ${rad(vard)}): ${rad(url)}`;
+	return kand ? `${rad(url)} (${rad(vard)})` : `${rad(url)} (extern länk, värd: ${rad(vard)})`;
 }
 
 function relationText(o: RelateratObjekt): string | null {
@@ -356,7 +357,7 @@ export async function relaterat(args: RelateratArgs, deps: ToolDeps) {
 		);
 		sida.forEach((o, i) => lines.push(...formatObjekt(o, start + i + 1)));
 		if (sida.some((o) => o.bilder.length || o.url)) {
-			lines.push("Servern hämtar inga bilder, bara länkar; värden står vid varje länk, och länkar till andra värdar än K-samsök, RAÄ och licenssidorna är märkta som okänd värd. Rättigheterna gäller medierna och står per bild – anta ingen licens som inte står där.");
+			lines.push("Servern hämtar inga bilder, bara länkar; värden står vid varje länk, och länkar till andra värdar än K-samsök, RAÄ, licenssidorna, DigitaltMuseum, Riksarkivet och Wikimedia/Wikipedia står som extern länk (oftast ett museums egen bildserver). Rättigheterna gäller medierna och står per bild – anta ingen licens som inte står där.");
 		}
 		if (start + sida.length < filtrerade.length) lines.push(`Fler: sida ${args.sida + 1}.`);
 	}
