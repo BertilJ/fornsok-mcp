@@ -269,7 +269,7 @@ describe.skipIf(!HAS_FALUN)(`Semantisk väg genom hela kedjan med falska AI/Vect
 		client = c.client;
 		const { tools } = await c.client.listTools();
 		expect(tools.map((t) => t.name).at(-1)).toBe("hitta_plats");
-		expect(tools).toHaveLength(9);
+		expect(tools).toHaveLength(12);
 		const res = await c.client.callTool({ name: "hitta_plats", arguments: { namn: "Bjursås" } });
 		const r = res.structuredContent as S;
 		expect(r.kalla).toBe("index");

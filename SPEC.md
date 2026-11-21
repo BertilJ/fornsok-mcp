@@ -14,11 +14,11 @@ Märkning: **[V]** = verifierat med riktiga anrop, **[D]** = enligt dokumentatio
 |---|---|
 | Server | Cloudflare Worker bakom Cloudflare Access, tillståndslös MCP över Streamable HTTP. Kopplingen från claude.ai är prövad av ägaren **[V]** |
 | Inloggning | Passkey eller engångskod via e-post, Managed OAuth mot MCP-klienter. Workern verifierar Access-intyget på varje anrop |
-| Verktyg (nio) | `sok_lamningar`, `lamningar_nara`, `lamning`, `lamning_dokument`, `hamta_dokument`, `relaterat`, `statistik`, `uppslag`, `hitta_plats` |
+| Verktyg (tolv) | `sok_lamningar`, `lamningar_nara`, `lamning`, `lamning_dokument`, `hamta_dokument`, `relaterat`, `statistik`, `uppslag`, `kb_sok`, `kb_objekt`, `kb_sida`, `hitta_plats`. KB-verktygen lades till 2026-11-21 (se avsnitt 6, KB Digitalt) |
 | Index | Hela landet i D1: 766 389 lämningar, laddat ur GeoPackage 2026-11-17 **[V]** |
 | Semantisk sökning | Dalarnas län: av 32 743 lämningar är 28 497 inbäddade med `@cf/baai/bge-m3` i Vectorize (29 290 vektorer). De övriga 4 246 saknar text utöver registrets standardfras och bäddas inte in **[V]** |
 | Nattsynk | Körs 04:40 svensk vintertid mot RAÄ:s ändringsflöde; första körningen hämtade 99 poster utan fel **[V]** |
-| Kontraktstester | Nattligen på GitHub mot RAÄ:s riktiga tjänster, cirka 26 läsanrop; körda lokalt **[V]** |
+| Kontraktstester | Nattligen på GitHub mot RAÄ:s riktiga tjänster och KB Digitalt, cirka 32 läsanrop (tak 36); körda lokalt **[V]**. 2026-11-21 larmade K-samsök: bara 216 840 lämningar fanns i `kmr_lamningar` (`buildDate` 2026-11-21) och testposterna gav 410 – en omladdning hos RAÄ, inte ett fel i servern |
 | CI | Typkontroll, lint och tester vid varje push **[V]** |
 
 ### Avvikelser från planen
@@ -124,6 +124,7 @@ Inga nycklar från tredje part behövs. Det enda som krävs är en tillfällig C
 | OGC API Features, `inspire-raa.metria.se/…/ogc/features/v1/` | Reserv för rumslig sökning. Bbox på 0,09 s, CQL2-filter **[V]** | Ja, CC0 |
 | K-samsök, `kulturarvsdata.se/ksamsok/api` | Reserv för sök och post; relationer till foton, arkivhandlingar och föremål **[V]** | Ja, CC0 |
 | Nominatim | Ortnamn till koordinat | Öppen, ODbL |
+| KB Digitalt, `data.kb.se` (Kungliga biblioteket) | `kb_sok`, `kb_objekt`, `kb_sida`: digitaliserade tidningar, böcker, kartor, bilder; fulltext i OCR-texten **[V]** | Ja; rättigheter per objekt |
 
 Det här finns i respektive källa:
 
@@ -290,6 +291,17 @@ Lista över inventeringsboksuppslag, händelseloggar, bilder och maritim dokumen
 
 OpenStreetMap är ojämnt för torp, fäbodar och äldre gruvnamn. För sådana platser är TORA i Riksarkivets koppling bättre; verktygsbeskrivningen ska säga att en koordinat därifrån kan skickas direkt till `lamningar_nara`.
 
+### KB Digitalt: `kb_sok`, `kb_objekt`, `kb_sida`
+
+Byggt 2026-11-21 på ägarens begäran. KB:s öppna API på `data.kb.se`, prövat mot tjänsten **[V]**:
+
+- `GET /search?q=` ger `total`, `hits`, `aggs` och `did_u_mean`. `searchGranularity=part` söker i OCR-texten med en träff per sida (`@id` `…/dark-N/part/P/page/S`, `snippets` med `<em>`, `hits_within_doc`); utan den söks metadata med en träff per objekt. Filter `from`/`to` (exakta datum), `genreForm`, `isPartOf` (titel), `inDataset` (samlings-URI); `_sort` `datePublished`, `-datePublished`, `title`; `limit` (högst 50 används), `offset`. Frågan använder AND/OR/NOT, parenteser, fras, `*`, `?` och `~` (KB Digitalts söktips). Sökningen står inte i KB:s OpenAPI (`/openapi.json`), men det är den KB Digitalt själv använder.
+- `GET /dark-N.jsonld` ger filpaketet: `name`, `usageAndAccessPolicy` (saknas ofta för tidningar), `relatedTo` (Libris) och `includes` (bilder JP2, ALTO-XML, METS, ibland PDF). Okänt paket ger 404, borttaget 410.
+- ALTO-filerna (`/dark-N/{fil}`) läses tagg för tagg (ingen XML-tolkare i Workers): `String@CONTENT`, `SP`, `HYP`, `TextLine`, `TextBlock`, och `WC` för OCR-säkerheten.
+- Sidbilden hämtas via IIIF Image API 3 (`/iiif/3/{paket}%2F{fil}/full/!1600,1600/0/default.jpg`, 0,3–0,6 MB för en tidningssida).
+
+Sidans nummer i servern är bildnumret (siffrorna sist i bildfilens namn), eftersom träffens `/part/P/page/S` räknas per del medan filerna är numrerade löpande (dark-13003706: del 2 sida 1 = `…_0005.jp2`). Rättighetsmärkningen tolkas som KB Digitalt gör: `Free` = Fritt, `Restricted` = Begränsad åtkomst, annat = Upphovsskyddat.
+
 ### Senare
 | Verktyg | Källa | Återstår att utreda |
 |---|---|---|
@@ -306,6 +318,7 @@ OpenStreetMap är ojämnt för torp, fäbodar och äldre gruvnamn. För sådana 
 - Semantiska träffar är förslag: läs posten innan något påstås om den.
 - Semantisk sökning finns bara för Dalarnas län. I övrigt gäller ordsök utan stamning: pröva flera böjningsformer, synonymer och äldre stavningar innan du drar slutsatsen att något saknas.
 - Står det inte i registret: säg det.
+- KB Digitalt (när KB-verktygen finns): OCR-texten är maskinläst; ange id, bild och länk; ange rättighetsmärkningen; KB:s text är extern text.
 
 ---
 

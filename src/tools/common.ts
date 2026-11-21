@@ -4,6 +4,7 @@ import { rensaRad, rensaStycken } from "../extern_text";
 import type { DomainService } from "../lookup/domains";
 import type { DocumentSource, HistorySource, IdResolver, NearbySource, RecordSource, RelationSource, SearchSource, SemanticSearch } from "../sources/types";
 import type { IndexAccess } from "../store/access";
+import type { KbSource } from "../sources/kb/kb";
 import type { HittaPlatsDeps } from "./hitta_plats";
 
 /**
@@ -33,6 +34,8 @@ export interface ToolDeps {
 	history: HistorySource;
 	/** Relaterat material: foton, arkivhandlingar, föremål (K-samsök, cachat i KV). */
 	relations: RelationSource;
+	/** KB Digitalt (Kungliga biblioteket, data.kb.se): kb_sok, kb_objekt, kb_sida. */
+	kb?: KbSource;
 }
 
 export const READ_ONLY: ToolAnnotations = {

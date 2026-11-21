@@ -12,7 +12,7 @@ export class ToolInputError extends Error {
 	}
 }
 
-export type SourceId = "ksamsok" | "ogc" | "fornsokapp" | "raa_datauttag" | "nominatim";
+export type SourceId = "ksamsok" | "ogc" | "fornsokapp" | "raa_datauttag" | "nominatim" | "kb";
 
 export const SOURCE_NAMES: Record<SourceId, string> = {
 	ksamsok: "K-samsök",
@@ -20,6 +20,7 @@ export const SOURCE_NAMES: Record<SourceId, string> = {
 	fornsokapp: "Fornsök-appens läs-API",
 	raa_datauttag: "RAÄ:s ändringsflöde (datauttag)",
 	nominatim: "OpenStreetMap Nominatim",
+	kb: "KB:s öppna data (data.kb.se)",
 };
 
 /**

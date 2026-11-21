@@ -8,6 +8,7 @@ import { userAgent } from "./config";
 import { DomainService } from "./lookup/domains";
 import { FallbackDomainSource, IndexDomainSource } from "./lookup/index_domaner";
 import { FornsokAppSource } from "./sources/fornsokapp/source";
+import { KbSource } from "./sources/kb/kb";
 import { KsamsokRelationSource } from "./sources/ksamsok/relations";
 import { KsamsokSource } from "./sources/ksamsok/source";
 import { OgcSource } from "./sources/ogc/source";
@@ -89,5 +90,6 @@ export function createLiveDeps(options: LiveDepsOptions & { domainDb?: D1Like } 
 		relations: new KvRelationSource(new KsamsokRelationSource(client), kv),
 		// Utan index går hitta_plats direkt till Nominatim.
 		plats: createHittaPlatsDeps({ kv, contactUrl, nominatim, fetch: clientOptions.fetch }),
+		kb: new KbSource(client),
 	};
 }

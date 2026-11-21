@@ -19,11 +19,11 @@ describe("strikta indataschemor", () => {
 		);
 	});
 
-	it("alla nio verktyg avvisar okända nycklar över MCP, och JSON-schemat säger additionalProperties: false", async () => {
+	it("alla tolv verktyg avvisar okända nycklar över MCP, och JSON-schemat säger additionalProperties: false", async () => {
 		const c = await connectMcp();
 		try {
 			const { tools } = await c.client.listTools();
-			expect(tools).toHaveLength(9);
+			expect(tools).toHaveLength(12);
 			for (const t of tools) expect((t.inputSchema as { additionalProperties?: unknown }).additionalProperties, t.name).toBe(false);
 			const fall: Array<[string, Record<string, unknown>, RegExp]> = [
 				["lamningar_nara", { lat: 60.6, lon: 15.6, radie: 9000 }, /Okänd parameter "radie" \(menade du "radie_m"\?\) i lamningar_nara/],
@@ -37,6 +37,9 @@ describe("strikta indataschemor", () => {
 				["statistik", { gruppera_pa: ["typ"], grupper: ["kommun"] }, /Okänd parameter "grupper"/],
 				["uppslag", { lista: "kommuner", soek: "Fal" }, /"soek" \(menade du "sok"\?\)/],
 				["hitta_plats", { namn: "Bjursås", lan_namn: "Dalarna" }, /"lan_namn" \(menade du "lan"\?\)/],
+				["kb_sok", { fraga: "hytta", nivå: "sida" }, /Okänd parameter "nivå" \(menade du "niva"\?\)/],
+				["kb_objekt", { id: "dark-1", sida: 1 }, /Okänd parameter "sida"/],
+				["kb_sida", { id: "dark-1", sidnummer: 3 }, /Okänd parameter "sidnummer"/],
 			];
 			for (const [name, args, re] of fall) {
 				const r = await c.client.callTool({ name, arguments: args });

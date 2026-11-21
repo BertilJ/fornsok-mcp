@@ -37,15 +37,16 @@ describe("MCP-servern med inspelade svar", () => {
 		await client?.close();
 	});
 
-	it("listar nio verktyg i fast ordning med scheman och annotationer", async () => {
+	it("listar tolv verktyg i fast ordning med scheman och annotationer", async () => {
 		const { tools } = await client.listTools();
-		expect(tools.map((t) => t.name)).toEqual(["sok_lamningar", "lamningar_nara", "lamning", "lamning_dokument", "hamta_dokument", "relaterat", "statistik", "uppslag", "hitta_plats"]);
+		expect(tools.map((t) => t.name)).toEqual(["sok_lamningar", "lamningar_nara", "lamning", "lamning_dokument", "hamta_dokument", "relaterat", "statistik", "uppslag", "kb_sok", "kb_objekt", "kb_sida", "hitta_plats"]);
 		for (const t of tools) {
 			expect(t.description).toBeTruthy();
 			expect(t.outputSchema).toBeTruthy();
 			expect(t.annotations).toMatchObject({ readOnlyHint: true, idempotentHint: true, openWorldHint: true, destructiveHint: false });
 		}
 		expect(client.getInstructions()).toMatch(/Länsstyrelsen avgör/);
+		expect(client.getInstructions()).toMatch(/KB Digitalt \(Kungliga biblioteket\)/);
 		expect(client.getInstructions()).not.toMatch(/Semantisk sökning finns bara/);
 	});
 

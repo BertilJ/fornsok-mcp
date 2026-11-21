@@ -158,6 +158,55 @@ export const ALLOWED_CALLS: readonly AllowedCall[] = [
 		},
 		requiredQuery: ["from", "to"],
 	},
+	// KB Digitalt (Kungliga biblioteket, data.kb.se): sökning, filpaket, ALTO-text och
+	// IIIF-bilder (verktygen kb_sok, kb_objekt, kb_sida; src/sources/kb/kb.ts). Bara läsning.
+	{
+		id: "kb.search",
+		source: "kb",
+		method: "GET",
+		origin: "https://data.kb.se",
+		path: /^\/search$/,
+		query: {
+			// oxlint-disable-next-line no-control-regex -- styrtecken avvisas avsiktligt
+			q: /^[^\u0000-\u001f\u007f]{1,500}$/,
+			searchGranularity: /^part$/,
+			from: /^\d{4}-\d{2}-\d{2}$/,
+			to: /^\d{4}-\d{2}-\d{2}$/,
+			// oxlint-disable-next-line no-control-regex -- styrtecken avvisas avsiktligt
+			genreForm: /^[^\u0000-\u001f\u007f]{1,200}$/,
+			// oxlint-disable-next-line no-control-regex -- styrtecken avvisas avsiktligt
+			isPartOf: /^[^\u0000-\u001f\u007f]{1,300}$/,
+			inDataset: /^https:\/\/data\.kb\.se\/dataset\/[A-Za-z0-9]{1,64}$/,
+			_sort: /^(?:datePublished|-datePublished|title)$/,
+			limit: /^\d{1,2}$/,
+			offset: /^\d{1,6}$/,
+		},
+		requiredQuery: ["q"],
+	},
+	{
+		id: "kb.paket",
+		source: "kb",
+		method: "GET",
+		origin: "https://data.kb.se",
+		path: /^\/dark-\d{1,12}\.jsonld$/,
+	},
+	// En ALTO-fil (OCR-text) i ett paket. Filnamnet är kodat: bara ett inledande
+	// "ALTO/" (%2F) godtas, därefter bokstäver, siffror, _ - . och kommatecken (%2C).
+	{
+		id: "kb.alto",
+		source: "kb",
+		method: "GET",
+		origin: "https://data.kb.se",
+		path: /^\/dark-\d{1,12}\/(?:ALTO%2F)?(?:[A-Za-z0-9_.-]|%2C){1,200}\.xml$/,
+	},
+	// IIIF-bild av en sida: hela bilden, nedskalad till högst 2000 bildpunkter, JPEG.
+	{
+		id: "kb.iiif",
+		source: "kb",
+		method: "GET",
+		origin: "https://data.kb.se",
+		path: /^\/iiif\/3\/dark-\d{1,12}%2F(?:(?:PROD_)?JP2000%2F)?(?:[A-Za-z0-9_.-]|%2C){1,200}\.jp2\/full\/!\d{2,4},\d{2,4}\/0\/default\.jpg$/,
+	},
 	// OpenStreetMap Nominatim, fritextsökning begränsad till Sverige (hitta_plats).
 	// Användningsvillkoren (högst 1 anrop/s, cache) hålls av src/tools/hitta_plats.ts.
 	{

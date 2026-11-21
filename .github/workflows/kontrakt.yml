@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   kontrakt:
-    name: Kontrakttester (cirka 28 anrop)
+    name: Kontrakttester (cirka 32 anrop)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -42,7 +42,7 @@ jobs:
           echo "KONTRAKT_RAPPORT=$RUNNER_TEMP/kontrakt-rapport.json" >> "$GITHUB_ENV"
           echo "KONTRAKT_LOGG=$RUNNER_TEMP/kontrakt-anrop.jsonl" >> "$GITHUB_ENV"
 
-      # Ett anrop i taget med paus, högst 32 anrop. Misslyckas steget blir körningen röd
+      # Ett anrop i taget med paus, högst 36 anrop. Misslyckas steget blir körningen röd
       # och GitHub mejlar förvarets ägare.
       - name: Kontrakttester
         run: npx vitest run --config vitest.kontrakt.config.mts

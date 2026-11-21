@@ -4,6 +4,7 @@ import { serverInstructions } from "./instructions";
 import type { ToolDeps } from "./tools/common";
 import { registerHamtaDokument, registerLamningDokument } from "./tools/dokument";
 import { registerHittaPlats } from "./tools/hitta_plats";
+import { registerKb } from "./tools/kb";
 import { registerLamning } from "./tools/lamning";
 import { registerLamningarNara } from "./tools/lamningar_nara";
 import { registerRelaterat } from "./tools/relaterat";
@@ -18,8 +19,8 @@ import { registerUppslag } from "./tools/uppslag";
  */
 export function createServer(deps: ToolDeps): McpServer {
 	const server = new McpServer(
-		{ name: SERVER_NAME, version: SERVER_VERSION, title: "Fornsök – Kulturmiljöregistret" },
-		{ instructions: serverInstructions({ semantic: deps.semantic ? (deps.semantic.omfang ?? "det semantiska omfånget") : null }) },
+		{ name: SERVER_NAME, version: SERVER_VERSION, title: "Fornsök – Kulturmiljöregistret och KB Digitalt" },
+		{ instructions: serverInstructions({ semantic: deps.semantic ? (deps.semantic.omfang ?? "det semantiska omfånget") : null, kb: !!deps.kb }) },
 	);
 	registerSokLamningar(server, deps);
 	registerLamningarNara(server, deps);
@@ -29,6 +30,7 @@ export function createServer(deps: ToolDeps): McpServer {
 	registerRelaterat(server, deps);
 	registerStatistik(server, deps);
 	registerUppslag(server, deps);
+	if (deps.kb) registerKb(server, deps.kb);
 	if (deps.plats) registerHittaPlats(server, deps.plats);
 	return server;
 }

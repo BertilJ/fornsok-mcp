@@ -25,7 +25,7 @@ import { type UpstreamResponse, UpstreamClient } from "../../src/upstream/client
 import { USER_AGENT } from "../../src/config";
 
 /** Högst så många anrop per körning, alla källor och alla testfiler sammanlagt. */
-export const MAX_ANROP = 32;
+export const MAX_ANROP = 36;
 /** Paus mellan två anrop (ms). */
 export const PAUS_MS = 600;
 
